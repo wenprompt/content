@@ -66,12 +66,12 @@ This pipeline eliminates all manual steps after the initial creative brief and a
 
 ## 5. System Architecture
 
-The system is composed of four layers: Frontend (React web UI), Backend (Python FastAPI server), External APIs (ComfyUI, Google, OpenAI), and Post-Processing (FFmpeg).
+The system is composed of four layers: Frontend (Next.js web UI), Backend (Python FastAPI server), External APIs (ComfyUI, Google, OpenAI), and Post-Processing (FFmpeg).
 
 ### Architecture Overview
 
 ```
-Web UI (React + Tailwind, localhost:3000)
+Web UI (Next.js 16 + Tailwind v4, localhost:3000)
     |  REST API + WebSocket
     v
 Backend Server (Python FastAPI, localhost:8000)
@@ -103,7 +103,7 @@ Backend Server (Python FastAPI, localhost:8000)
 
 | Layer | Technology | Rationale |
 |-------|-----------|-----------|
-| Frontend | React 18 + Tailwind CSS + Vite | Fast, modern, beginner-friendly |
+| Frontend | Next.js 16 (React 19) + Tailwind CSS v4 + TanStack Query v5 | SSR/SSG, App Router, server-first architecture; Turbopack default bundler (replaces Vite) |
 | Backend | Python 3.11+ / FastAPI | Async support, clean API design |
 | Local Video | ComfyUI REST API (localhost:8188) | LTX-2.3 runs here, already installed |
 | Google APIs | google-genai Python SDK | Nano Banana 2 + Veo 3.1 |
@@ -133,28 +133,52 @@ Backend Server (Python FastAPI, localhost:8000)
 | `/upload/image` | POST | Upload input images for image-to-video |
 | `/ws?clientId={id}` | WS | Real-time progress (sampling %) |
 
-#### Workflow Templates (JSON)
+#### Workflow Building (Programmatic, not JSON templates)
 
-The system stores pre-built ComfyUI workflow templates that get parameterized at runtime:
+Workflows are built programmatically in `backend/clients/comfyui_client.py` — no static JSON template files. This approach is more maintainable because node connections, LoRA insertion, and T2V/I2V branching are handled in Python code.
 
-| Template | Purpose | Key Parameters |
-|----------|---------|---------------|
-| `ltx_text_to_video.json` | Generate video from text | prompt, negative_prompt, width, height, frames, seed, cfg, steps |
-| `ltx_image_to_video.json` | Animate a reference image | input_image, prompt, width, height, frames, seed, cfg |
-| `ltx_video_extend.json` | Continue from last frames | input_video, continuation_prompt, frames |
-| `ltx_text_to_video_lora.json` | Text-to-video + camera LoRA | prompt, lora_name, lora_strength, + base params |
-| `ltx_image_to_video_lora.json` | Image-to-video + camera LoRA | input_image, lora_name, lora_strength, + base params |
-| `ltx_latent_upscale.json` | 2x quality upscale | input_video, upscale_model |
+**Critical: T2V and I2V use separate workflow structures.** ComfyUI validates ALL node inputs at submission time (no native bypass/mute in API format — see [GitHub Issue #4028](https://github.com/comfyanonymous/ComfyUI/issues/4028)). A T2V workflow that includes `LoadImage("example.png")` with `bypass=True` will still fail validation with a 400 error. Therefore:
+
+- **T2V workflow:** Excludes all image nodes (LoadImage, ResizeImageMaskNode, ResizeImagesByLongerEdge, LTXVPreprocess, LTXVImgToVideoInplace). `EmptyLTXVLatentVideo` feeds directly into `LTXVConcatAVLatent` for stage 1, and `LTXVLatentUpsampler` feeds directly into stage 2.
+- **I2V workflow:** Includes image preprocessing chain and `LTXVImgToVideoInplace` at both stages with `bypass=False`.
+
+**Two-stage distilled pipeline (LTX-2.3):**
+```
+Stage 1: Half-resolution (w/2, h/2), 8 steps, euler_ancestral_cfg_pp, CFG=1
+    → LTXVLatentUpsampler 2x
+Stage 2: Full-resolution, 4 steps (3 sigmas), euler_cfg_pp, CFG=1
+    → VAEDecodeTiled → CreateVideo → SaveVideo
+```
+
+**Required models:**
+- Checkpoint: `ltx-2.3-22b-dev-fp8.safetensors` (loaded via CheckpointLoaderSimple)
+- Text encoder: `gemma_3_12B_it_fp4_mixed.safetensors` (loaded via LTXAVTextEncoderLoader, NOT CLIPLoader)
+- Distilled LoRA: `ltx-2.3-22b-distilled-lora-384.safetensors` (always loaded, strength 0.5)
+- Latent upscaler: `ltx-2.3-spatial-upscaler-x2-1.0.safetensors`
+- Audio VAE: loaded via LTXVAudioVAELoader from checkpoint
+
+**Key node types (NOT the same as older LTX-Video 2b):**
+- `LTXAVTextEncoderLoader` (not CLIPLoader)
+- `SamplerCustomAdvanced` + `CFGGuider` (not SamplerCustom)
+- `ManualSigmas` (not LTXVScheduler)
+- `VAEDecodeTiled` (not VAEDecode — for VRAM efficiency)
+- `LoraLoaderModelOnly` (not LoraLoader — model-only variant)
+- `LTXVImgToVideoInplace` (I2V only)
+- `LTXVEmptyLatentAudio` + `LTXVConcatAVLatent` + `LTXVSeparateAVLatent` + `LTXVAudioVAEDecode` (native audio)
+
+**Image upload for I2V:** Use `POST /upload/image` with `subfolder=""` (empty string). Using `subfolder="input"` places the file in `input/input/` which `LoadImage` cannot find.
+
+**History output key:** ComfyUI returns video files under the `"images"` key (not `"videos"` or `"gifs"`) in the history response.
 
 #### Key Parameters
 
 | Parameter | Range | Default | Notes |
 |-----------|-------|---------|-------|
-| seed | 0 to 2^64 | random | Set for reproducibility |
-| steps | 1–10000 | 40 | Quality/speed sweet spot |
-| cfg | 0–100 | 3.5 | 3.0–3.5 for LTX-2.3; above 4.0 causes artifacts |
-| width/height | div by 32 | 1920/1080 | Match target aspect ratio |
-| num_frames | 8n+1 | 121 | 121 frames = 5s at 24fps |
+| seed | 0 to 2^32 | random | Set for reproducibility; stage 2 uses seed+1 |
+| steps | N/A | 8+4 (fixed) | Distilled pipeline uses fixed sigma schedules |
+| cfg | N/A | 1 (fixed) | Distilled LoRA requires CFG=1 |
+| width/height | div by 32 | 1280/720 | Half-res for stage 1, full for stage 2 |
+| num_frames | 8n+1 | 121 | 121 frames = ~5s at 24fps. Minimum: 9 frames |
 
 #### Async Flow
 
@@ -314,6 +338,18 @@ Analysis outputs directly modify the prompt generation system:
 
 ## 9. Frontend Screens
 
+### Architecture: Next.js App Router
+
+All screens map to route segments in the `app/` directory. Server Components are the default — use `"use client"` only where interactivity requires it (forms, WebSocket listeners, drag-and-drop). Data fetching pattern: Server Components handle initial data loads (project list, trend data); TanStack Query v5 handles all client-side data fetching (polling APIs, job status, generation progress). TanStack Query uses `isPending` (not `isLoading`), `gcTime` (not `cacheTime`), and `HydrationBoundary` for SSR prefetching.
+
+| Screen | Route | Component Strategy |
+|--------|-------|-------------------|
+| Trend Browser | `app/trends/page.tsx` | Server Component for initial trend data; `"use client"` for filters, search, and "Analyze" actions |
+| Creative Brief | `app/brief/page.tsx` | `"use client"` — interactive form with file uploads and trend auto-population |
+| Shot Planner | `app/planner/page.tsx` | `"use client"` — drag-and-drop reordering, editable prompts, LoRA sliders |
+| Progress Monitor | `app/progress/page.tsx` | `"use client"` — WebSocket for ComfyUI, TanStack Query polling for cloud API status |
+| Output Gallery | `app/gallery/page.tsx` | Server Component for initial load; `"use client"` for video playback and regenerate actions |
+
 ### Screen 1: Trend Browser
 
 A new screen that lets users explore viral content before creating their own.
@@ -469,7 +505,23 @@ content-pipeline/
 │   ├── workflows/                 # ComfyUI JSON templates
 │   └── skills/                    # Prompt engineering knowledge
 │
-├── frontend/                      # React + Tailwind + Vite
+├── frontend/                      # Next.js 16 + Tailwind v4 + TanStack Query v5
+│   ├── app/                      # App Router routes
+│   │   ├── layout.tsx            # Root layout (QueryClientProvider, global styles)
+│   │   ├── page.tsx              # Home / dashboard
+│   │   ├── trends/
+│   │   │   └── page.tsx          # Trend Browser screen
+│   │   ├── brief/
+│   │   │   └── page.tsx          # Creative Brief Form screen
+│   │   ├── planner/
+│   │   │   └── page.tsx          # Shot Planner screen
+│   │   ├── progress/
+│   │   │   └── page.tsx          # Progress Monitor screen
+│   │   └── gallery/
+│   │       └── page.tsx          # Output Gallery screen
+│   ├── components/               # Shared UI components
+│   └── lib/                      # API clients, query utilities, TanStack Query hooks
+│
 └── output/{project_id}/           # Generated content
     ├── images/  clips/  frames/  final/
 ```
@@ -526,9 +578,11 @@ apify-client>=1.7.0
 ### Node.js (frontend)
 
 ```
-react ^18.3   react-dom ^18.3   react-router-dom ^6.22
-tailwindcss ^3.4   vite ^5.1   lucide-react ^0.344
+next ^16.0   react ^19.0   react-dom ^19.0
+tailwindcss ^4.0   @tanstack/react-query ^5.0   lucide-react ^0.344
 ```
+
+**Notes:** `react-router-dom` is dropped — Next.js App Router provides built-in file-system routing. Vite is dropped — Turbopack is the default bundler in Next.js 16. Tailwind v4 uses CSS-first configuration (`@import "tailwindcss"` in CSS, no `tailwind.config.js`).
 
 ### System
 

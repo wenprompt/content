@@ -1,0 +1,361 @@
+{
+  "236": {
+    "class_type": "CheckpointLoaderSimple",
+    "inputs": {
+      "ckpt_name": "ltx-2.3-22b-dev-fp8.safetensors"
+    }
+  },
+  "243": {
+    "class_type": "LTXAVTextEncoderLoader",
+    "inputs": {
+      "text_encoder": "gemma_3_12B_it_fp4_mixed.safetensors",
+      "ckpt_name": "ltx-2.3-22b-dev-fp8.safetensors",
+      "device": "default"
+    }
+  },
+  "221": {
+    "class_type": "LTXVAudioVAELoader",
+    "inputs": {
+      "ckpt_name": "ltx-2.3-22b-dev-fp8.safetensors"
+    }
+  },
+  "232": {
+    "class_type": "LoraLoaderModelOnly",
+    "inputs": {
+      "lora_name": "ltx-2.3-22b-distilled-lora-384.safetensors",
+      "strength_model": 0.5,
+      "model": [
+        "236",
+        0
+      ]
+    }
+  },
+  "233": {
+    "class_type": "LatentUpscaleModelLoader",
+    "inputs": {
+      "model_name": "ltx-2.3-spatial-upscaler-x2-1.0.safetensors"
+    }
+  },
+  "234": {
+    "class_type": "LoraLoaderModelOnly",
+    "inputs": {
+      "lora_name": "ltx-2-19b-lora-camera-control-dolly-out.safetensors",
+      "strength_model": 0.9,
+      "model": [
+        "232",
+        0
+      ]
+    }
+  },
+  "240": {
+    "class_type": "CLIPTextEncode",
+    "inputs": {
+      "text": "A pair of wireless earbuds rests on a dark slate surface. Behind them, a modern desk setup reveals itself \u2014 a curved ultrawide monitor glowing with ambient light, a mechanical keyboard, and a potted monstera plant in the corner. Twilight cityscape through floor-to-ceiling windows.",
+      "clip": [
+        "243",
+        0
+      ]
+    }
+  },
+  "247": {
+    "class_type": "CLIPTextEncode",
+    "inputs": {
+      "text": "worst quality, low quality, blurry, distorted, watermark, text, logo, shaky, glitchy, deformed, morphing, warping, flicker",
+      "clip": [
+        "243",
+        0
+      ]
+    }
+  },
+  "239": {
+    "class_type": "LTXVConditioning",
+    "inputs": {
+      "frame_rate": 24,
+      "positive": [
+        "240",
+        0
+      ],
+      "negative": [
+        "247",
+        0
+      ]
+    }
+  },
+  "228": {
+    "class_type": "EmptyLTXVLatentVideo",
+    "inputs": {
+      "width": 384,
+      "height": 256,
+      "length": 121,
+      "batch_size": 1
+    }
+  },
+  "214": {
+    "class_type": "LTXVEmptyLatentAudio",
+    "inputs": {
+      "frames_number": 121,
+      "frame_rate": 24,
+      "batch_size": 1,
+      "audio_vae": [
+        "221",
+        0
+      ]
+    }
+  },
+  "222": {
+    "class_type": "LTXVConcatAVLatent",
+    "inputs": {
+      "video_latent": [
+        "228",
+        0
+      ],
+      "audio_latent": [
+        "214",
+        0
+      ]
+    }
+  },
+  "231": {
+    "class_type": "CFGGuider",
+    "inputs": {
+      "cfg": 1,
+      "model": [
+        "234",
+        0
+      ],
+      "positive": [
+        "239",
+        0
+      ],
+      "negative": [
+        "239",
+        1
+      ]
+    }
+  },
+  "209": {
+    "class_type": "KSamplerSelect",
+    "inputs": {
+      "sampler_name": "euler_ancestral_cfg_pp"
+    }
+  },
+  "252": {
+    "class_type": "ManualSigmas",
+    "inputs": {
+      "sigmas": "1.0, 0.99375, 0.9875, 0.98125, 0.975, 0.909375, 0.725, 0.421875, 0.0"
+    }
+  },
+  "237": {
+    "class_type": "RandomNoise",
+    "inputs": {
+      "noise_seed": 42
+    }
+  },
+  "215": {
+    "class_type": "SamplerCustomAdvanced",
+    "inputs": {
+      "noise": [
+        "237",
+        0
+      ],
+      "guider": [
+        "231",
+        0
+      ],
+      "sampler": [
+        "209",
+        0
+      ],
+      "sigmas": [
+        "252",
+        0
+      ],
+      "latent_image": [
+        "222",
+        0
+      ]
+    }
+  },
+  "217": {
+    "class_type": "LTXVSeparateAVLatent",
+    "inputs": {
+      "av_latent": [
+        "215",
+        0
+      ]
+    }
+  },
+  "253": {
+    "class_type": "LTXVLatentUpsampler",
+    "inputs": {
+      "samples": [
+        "217",
+        0
+      ],
+      "upscale_model": [
+        "233",
+        0
+      ],
+      "vae": [
+        "236",
+        2
+      ]
+    }
+  },
+  "212": {
+    "class_type": "LTXVCropGuides",
+    "inputs": {
+      "positive": [
+        "239",
+        0
+      ],
+      "negative": [
+        "239",
+        1
+      ],
+      "latent": [
+        "217",
+        0
+      ]
+    }
+  },
+  "229": {
+    "class_type": "LTXVConcatAVLatent",
+    "inputs": {
+      "video_latent": [
+        "253",
+        0
+      ],
+      "audio_latent": [
+        "217",
+        1
+      ]
+    }
+  },
+  "213": {
+    "class_type": "CFGGuider",
+    "inputs": {
+      "cfg": 1,
+      "model": [
+        "234",
+        0
+      ],
+      "positive": [
+        "212",
+        0
+      ],
+      "negative": [
+        "212",
+        1
+      ]
+    }
+  },
+  "246": {
+    "class_type": "KSamplerSelect",
+    "inputs": {
+      "sampler_name": "euler_cfg_pp"
+    }
+  },
+  "211": {
+    "class_type": "ManualSigmas",
+    "inputs": {
+      "sigmas": "0.85, 0.7250, 0.4219, 0.0"
+    }
+  },
+  "216": {
+    "class_type": "RandomNoise",
+    "inputs": {
+      "noise_seed": 43
+    }
+  },
+  "219": {
+    "class_type": "SamplerCustomAdvanced",
+    "inputs": {
+      "noise": [
+        "216",
+        0
+      ],
+      "guider": [
+        "213",
+        0
+      ],
+      "sampler": [
+        "246",
+        0
+      ],
+      "sigmas": [
+        "211",
+        0
+      ],
+      "latent_image": [
+        "229",
+        0
+      ]
+    }
+  },
+  "218": {
+    "class_type": "LTXVSeparateAVLatent",
+    "inputs": {
+      "av_latent": [
+        "219",
+        0
+      ]
+    }
+  },
+  "251": {
+    "class_type": "VAEDecodeTiled",
+    "inputs": {
+      "tile_size": 768,
+      "overlap": 64,
+      "temporal_size": 4096,
+      "temporal_overlap": 4,
+      "samples": [
+        "218",
+        0
+      ],
+      "vae": [
+        "236",
+        2
+      ]
+    }
+  },
+  "220": {
+    "class_type": "LTXVAudioVAEDecode",
+    "inputs": {
+      "samples": [
+        "218",
+        1
+      ],
+      "audio_vae": [
+        "221",
+        0
+      ]
+    }
+  },
+  "242": {
+    "class_type": "CreateVideo",
+    "inputs": {
+      "fps": 24,
+      "images": [
+        "251",
+        0
+      ],
+      "audio": [
+        "220",
+        0
+      ]
+    }
+  },
+  "75": {
+    "class_type": "SaveVideo",
+    "inputs": {
+      "filename_prefix": "video/ltx",
+      "format": "auto",
+      "codec": "auto",
+      "video": [
+        "242",
+        0
+      ]
+    }
+  }
+}

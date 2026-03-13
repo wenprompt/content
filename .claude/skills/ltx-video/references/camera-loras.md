@@ -71,8 +71,8 @@ A faint mechanical tick marks each second.
 
 ### ComfyUI Nodes for Camera LoRAs
 - Load via `LoraLoaderModelOnly` or `LTXVQ8LoraModelLoader`
-- Connect to the model pipeline before the sampler (`LTXVBaseSampler`)
-- Example workflows: `LTX-2_T2V_Full_wLora.json`, `LTX-2_I2V_Full_wLora.json`
+- Connect to the model pipeline before the sampler — our code chains into `CFGGuider` → `SamplerCustomAdvanced`
+- Camera LoRAs use `ltx-2-19b-*` naming but are **confirmed compatible with the 22B LTX-2.3 model**
 
 ---
 
@@ -92,7 +92,19 @@ IC-LoRAs separate motion/structure from visual styling. They extract structure f
 2. `LTXAddVideoICLoRAGuide` — Adds downscaled reference latent as guide at specific frame index
 3. `LTXVInContextSampler` — Specialized sampler (replaces `LTXVBaseSampler` for IC-LoRA workflows)
 
-Example workflow: `LTX-2_ICLoRA_All_Distilled.json`
+### 2.6 Motion Track Control — `ltx-2.3-22b-ic-lora-motion-track-control-ref0.5` (NEW)
+
+**Purpose**: Motion tracking control — guides video generation by tracking specific elements from reference.
+
+- **LTX-2.3 specific** — uses the new 22B model (not backwards compatible with 19B)
+- `ref0.5` = reference at 0.5x output resolution (same as union control)
+- Same IC-LoRA workflow: `LTXICLoRALoaderModelOnly` → `LTXAddVideoICLoRAGuide` → `LTXVInContextSampler`
+- Cannot combine with camera LoRAs (different sampler requirement)
+
+### 2.7 Updated Union Control — `ltx-2.3-22b-ic-lora-union-control-ref0.5` (NEW)
+
+**Purpose**: Same as the 19B union control but optimized for the 22B LTX-2.3 model.
+Use this instead of `ltx-2-19b-ic-lora-union-control-ref0.5` when running LTX-2.3.
 
 ### 2.1 Canny Control — `ltx-2-19b-ic-lora-canny-control`
 
@@ -179,9 +191,8 @@ Example workflow: `LTX-2_ICLoRA_All_Distilled.json`
 
 **Compatibility**: Can be combined with both camera LoRAs and IC-LoRAs. The IC-LoRA pipeline is specifically designed around the distilled setup.
 
-Example workflows:
-- `LTX-2_T2V_Distilled_wLora.json` — Distilled + camera LoRA
-- `LTX-2_ICLoRA_All_Distilled.json` — Distilled + IC-LoRA
+Our pipeline loads distilled LoRA via `LoraLoaderModelOnly` (node 232) at 0.5 strength,
+chained from `CheckpointLoaderSimple`. Camera LoRAs chain after distilled (node 234).
 
 ---
 
@@ -282,13 +293,28 @@ Generate 10-15 second clips. Hold each composition for at least 3 seconds.
 | `LTXVQ8LoraModelLoader` | Q8 quantized LoRA variants |
 | `LTXICLoRALoaderModelOnly` | All IC-LoRAs (extracts downscale factor) |
 
-### Sampler Nodes
+### Sampler Nodes (Our Pipeline)
+
+Our code uses `SamplerCustomAdvanced` + `CFGGuider` + `ManualSigmas` for both stages.
+This is the standard ComfyUI advanced sampling approach — more flexible than the older
+convenience nodes.
 
 | Node | Used For |
 |------|----------|
-| `LTXVBaseSampler` | Standard T2V/I2V with camera LoRAs |
+| `SamplerCustomAdvanced` | Both Stage 1 and Stage 2 in our pipeline |
+| `CFGGuider` | Classifier-free guidance (cfg=1.0 for distilled) |
+| `ManualSigmas` | Explicit sigma schedules for distilled pipeline |
+| `KSamplerSelect` | Selects sampler algorithm (euler_ancestral_cfg_pp / euler_cfg_pp) |
 | `LTXVInContextSampler` | IC-LoRA workflows (requires `guiding_latents` input) |
 | `LTXVExtendSampler` | Video continuation/extension |
+
+### Text Encoding Nodes (Our Pipeline)
+
+| Node | Used For |
+|------|----------|
+| `LTXAVTextEncoderLoader` | Loads Gemma 3 12B text encoder + checkpoint |
+| `CLIPTextEncode` | Encodes positive and negative prompts |
+| `LTXVConditioning` | Wraps encoded text with frame_rate for conditioning |
 
 ### IC-LoRA Preprocessing Nodes (from `comfyui_controlnet_aux`)
 
@@ -303,20 +329,13 @@ Generate 10-15 second clips. Hold each composition for at least 3 seconds.
 | Node | Purpose |
 |------|---------|
 | `LTXAddVideoICLoRAGuide` | Adds downscaled reference latent as guide |
-| `LTXVScheduler` | LTX-specific noise scheduler |
+| `LTXVAddGuide` | Keyframe conditioning (used by our guide_frames) |
+| `LTXVCropGuides` | Adjusts guide conditioning after upscale for Stage 2 |
 | `LTXVLatentUpsampler` | 2x spatial upscale in latent space |
-| `LTXVLatentUpsamplerModelLoader` | Loads the upscaler model |
-| `DualClipLoader` | Loads Gemma 3 12B text encoder |
-
-### Example Workflow Files
-
-| Workflow | Use Case |
-|----------|----------|
-| `LTX-2_T2V_Full_wLora.json` | Text-to-video with camera LoRA |
-| `LTX-2_I2V_Full_wLora.json` | Image-to-video with camera LoRA |
-| `LTX-2_T2V_Distilled_wLora.json` | Fast distilled with camera LoRA |
-| `LTX-2_I2V_Distilled_wLora.json` | Fast distilled I2V with camera LoRA |
-| `LTX-2_ICLoRA_All_Distilled.json` | IC-LoRA with distilled pipeline |
+| `LatentUpscaleModelLoader` | Loads the spatial upscaler model |
+| `LTXVImgToVideoInplace` | Injects reference image into latent (I2V) |
+| `LTXVPreprocess` | Applies CRF compression to reference images |
+| `LTXVConcatAVLatent` / `LTXVSeparateAVLatent` | Audio-video latent management |
 
 ---
 
@@ -334,12 +353,5 @@ Generate 10-15 second clips. Hold each composition for at least 3 seconds.
 | VRAM issues with IC-LoRA | Only run one IC-LoRA type at a time; use Union Control instead |
 | Camera LoRA + IC-LoRA not working | Cannot combine — use in separate passes or choose one |
 | Brightness flash on extend | Reduce injected frame strength |
-
-### CivitAI Camera LoRAs (Wan2.1/2.2 — check LTX-2.3 compatibility)
-
-- **360 Orbit** — Full rotation. Strength 0.9-1.0. Great for product showcases.
-- **Crash Zoom In** — Rapid dramatic zoom. Strength 0.7-0.9. TikTok scroll-stoppers.
-- **Crash Zoom Out** — Rapid pull-back. Context reveals.
-- **Crane Up/Down/Overhead** — Vertical crane movements.
-- **Arc Shot** — Curved path (lateral + rotational). More cinematic than orbit.
-- **Face-to-Feet Sweep** — Vertical scan. Strength 0.7-1.0. Fashion/apparel.
+| I2V frozen frame / no motion | Lower `img_compression` to 18-25 (more MPEG artifacts = more motion) |
+| Audio quality poor | Use NAG technique: video neg 0.25, audio neg 2.5 (see `references/advanced-techniques.md`) |

@@ -56,6 +56,22 @@ class ComfyUIClient:
             data = r.json()
             return str(data.get("name", path.name))
 
+    async def upload_audio(self, audio_path: str | Path, subfolder: str = "") -> str:
+        """Upload audio file to ComfyUI input folder."""
+        path = Path(audio_path)
+        mime = "audio/wav" if path.suffix == ".wav" else f"audio/{path.suffix.lstrip('.')}"
+        async with httpx.AsyncClient() as client:
+            with path.open("rb") as f:
+                r = await client.post(
+                    f"{self.base_url}/upload/image",
+                    files={"image": (path.name, f, mime)},
+                    data={"subfolder": subfolder, "overwrite": "true"},
+                    timeout=30.0,
+                )
+            r.raise_for_status()
+            data = r.json()
+            return str(data.get("name", path.name))
+
     async def queue_prompt(self, prompt: dict[str, Any]) -> str:
         payload = {"prompt": prompt, "client_id": self.client_id}
         async with httpx.AsyncClient() as client:
@@ -108,6 +124,10 @@ class ComfyUIClient:
         i2v_strength: float = 0.7,
         img_compression: int = 28,
         guide_frames: list[tuple[str, int, float]] | None = None,
+        nag_video_cfg: float = 0.0,
+        nag_audio_cfg: float = 0.0,
+        single_pass: bool = False,
+        audio_filename: str | None = None,
     ) -> dict[str, Any]:
         """Build the LTX-2.3 two-stage distilled API workflow.
 
@@ -121,12 +141,24 @@ class ComfyUIClient:
           frame_idx: 0 for first frame, -1 for last frame, etc.
           strength: 0.0-1.0, how strongly to condition on the image.
 
+        nag_video_cfg / nag_audio_cfg: When both > 0, use DualCFGGuider instead
+          of CFGGuider for split video/audio negative guidance (NAG technique).
+          Typical values: video=0.25, audio=2.5.
+
+        single_pass: Skip stage 2 refinement — generate at full resolution in
+          one pass. Faster but lower quality.
+
+        audio_filename: For IA2V (image+audio to video) — encode real audio
+          instead of generating empty audio latents.
+
         ComfyUI validates ALL node inputs at submission time, so T2V cannot
         include LoadImage with a nonexistent file — the workflows must differ.
         """
         is_i2v = image_filename is not None
-        half_w = width // 2
-        half_h = height // 2
+        use_nag = nag_video_cfg > 0 and nag_audio_cfg > 0
+        has_audio_input = audio_filename is not None
+        half_w = width // 2 if not single_pass else width
+        half_h = height // 2 if not single_pass else height
 
         w: dict[str, Any] = {}
 
@@ -307,31 +339,82 @@ class ComfyUIClient:
         else:
             stage1_video_source = ["228", 0]
 
-        w["214"] = {
-            "class_type": "LTXVEmptyLatentAudio",
-            "inputs": {
-                "frames_number": num_frames,
-                "frame_rate": fps,
-                "batch_size": 1,
-                "audio_vae": ["221", 0],
-            },
-        }
+        # ── Audio latent: real audio input (IA2V) or empty ────────────
+        if has_audio_input:
+            w["a_load"] = {
+                "class_type": "LoadAudio",
+                "inputs": {"audio": audio_filename},
+            }
+            duration = num_frames / fps
+            w["a_trim"] = {
+                "class_type": "TrimAudioDuration",
+                "inputs": {
+                    "audio": ["a_load", 0],
+                    "start_index": 0.0,
+                    "duration": duration,
+                },
+            }
+            w["a_encode"] = {
+                "class_type": "LTXVAudioVAEEncode",
+                "inputs": {
+                    "audio": ["a_trim", 0],
+                    "audio_vae": ["221", 0],
+                },
+            }
+            w["a_mask"] = {
+                "class_type": "SolidMask",
+                "inputs": {"value": 0, "width": width, "height": height},
+            }
+            w["a_noise"] = {
+                "class_type": "SetLatentNoiseMask",
+                "inputs": {
+                    "samples": ["a_encode", 0],
+                    "mask": ["a_mask", 0],
+                },
+            }
+            audio_latent_source: list[str | int] = ["a_noise", 0]
+        else:
+            w["214"] = {
+                "class_type": "LTXVEmptyLatentAudio",
+                "inputs": {
+                    "frames_number": num_frames,
+                    "frame_rate": fps,
+                    "batch_size": 1,
+                    "audio_vae": ["221", 0],
+                },
+            }
+            audio_latent_source = ["214", 0]
+
         w["222"] = {
             "class_type": "LTXVConcatAVLatent",
             "inputs": {
                 "video_latent": stage1_video_source,
-                "audio_latent": ["214", 0],
+                "audio_latent": audio_latent_source,
             },
         }
-        w["231"] = {
-            "class_type": "CFGGuider",
-            "inputs": {
-                "cfg": 1,
-                "model": model_source,
-                "positive": stage1_pos,
-                "negative": stage1_neg,
-            },
-        }
+        if use_nag:
+            w["231"] = {
+                "class_type": "DualCFGGuider",
+                "inputs": {
+                    "model": model_source,
+                    "cond1": stage1_pos,
+                    "cond2": stage1_pos,
+                    "negative": stage1_neg,
+                    "cfg_conds": nag_video_cfg,
+                    "cfg_cond2_negative": nag_audio_cfg,
+                    "style": "regular",
+                },
+            }
+        else:
+            w["231"] = {
+                "class_type": "CFGGuider",
+                "inputs": {
+                    "cfg": 1,
+                    "model": model_source,
+                    "positive": stage1_pos,
+                    "negative": stage1_neg,
+                },
+            }
         w["209"] = {
             "class_type": "KSamplerSelect",
             "inputs": {"sampler_name": "euler_ancestral_cfg_pp"},
@@ -357,92 +440,110 @@ class ComfyUIClient:
             },
         }
 
-        # ── Separate + Upscale ─────────────────────────────────────────
+        # ── Separate + Upscale + Stage 2 ─────────────────────────────
 
         w["217"] = {
             "class_type": "LTXVSeparateAVLatent",
             "inputs": {"av_latent": ["215", 0]},
         }
-        w["253"] = {
-            "class_type": "LTXVLatentUpsampler",
-            "inputs": {
-                "samples": ["217", 0],
-                "upscale_model": ["233", 0],
-                "vae": ["236", 2],
-            },
-        }
 
-        # ── Stage 2: Refinement at full resolution ─────────────────────
-
-        # Stage 2 video latent source: I2V re-injects image, T2V uses upscaled directly
-        if is_i2v:
-            w["230"] = {
-                "class_type": "LTXVImgToVideoInplace",
+        if single_pass:
+            # Single-pass: skip upscale and stage 2, decode stage 1 directly
+            decode_source = "217"
+        else:
+            w["253"] = {
+                "class_type": "LTXVLatentUpsampler",
                 "inputs": {
-                    "strength": 1,
-                    "bypass": False,
+                    "samples": ["217", 0],
+                    "upscale_model": ["233", 0],
                     "vae": ["236", 2],
-                    "image": ["248", 0],
-                    "latent": ["253", 0],
                 },
             }
-            stage2_video_source: list[str | int] = ["230", 0]
-        else:
-            stage2_video_source = ["253", 0]
 
-        w["212"] = {
-            "class_type": "LTXVCropGuides",
-            "inputs": {
-                "positive": stage1_pos,
-                "negative": stage1_neg,
-                "latent": ["217", 0],
-            },
-        }
-        w["229"] = {
-            "class_type": "LTXVConcatAVLatent",
-            "inputs": {
-                "video_latent": stage2_video_source,
-                "audio_latent": ["217", 1],
-            },
-        }
-        w["213"] = {
-            "class_type": "CFGGuider",
-            "inputs": {
-                "cfg": 1,
-                "model": model_source,
-                "positive": ["212", 0],
-                "negative": ["212", 1],
-            },
-        }
-        w["246"] = {
-            "class_type": "KSamplerSelect",
-            "inputs": {"sampler_name": "euler_cfg_pp"},
-        }
-        w["211"] = {
-            "class_type": "ManualSigmas",
-            "inputs": {"sigmas": "0.85, 0.7250, 0.4219, 0.0"},
-        }
-        w["216"] = {
-            "class_type": "RandomNoise",
-            "inputs": {"noise_seed": (seed + 1) % (2**32)},
-        }
-        w["219"] = {
-            "class_type": "SamplerCustomAdvanced",
-            "inputs": {
-                "noise": ["216", 0],
-                "guider": ["213", 0],
-                "sampler": ["246", 0],
-                "sigmas": ["211", 0],
-                "latent_image": ["229", 0],
-            },
-        }
+            # Stage 2 video latent source: I2V re-injects image, T2V uses upscaled
+            if is_i2v:
+                w["230"] = {
+                    "class_type": "LTXVImgToVideoInplace",
+                    "inputs": {
+                        "strength": 1,
+                        "bypass": False,
+                        "vae": ["236", 2],
+                        "image": ["248", 0],
+                        "latent": ["253", 0],
+                    },
+                }
+                stage2_video_source: list[str | int] = ["230", 0]
+            else:
+                stage2_video_source = ["253", 0]
+
+            w["212"] = {
+                "class_type": "LTXVCropGuides",
+                "inputs": {
+                    "positive": stage1_pos,
+                    "negative": stage1_neg,
+                    "latent": ["217", 0],
+                },
+            }
+            w["229"] = {
+                "class_type": "LTXVConcatAVLatent",
+                "inputs": {
+                    "video_latent": stage2_video_source,
+                    "audio_latent": ["217", 1],
+                },
+            }
+            if use_nag:
+                w["213"] = {
+                    "class_type": "DualCFGGuider",
+                    "inputs": {
+                        "model": model_source,
+                        "cond1": ["212", 0],
+                        "cond2": ["212", 0],
+                        "negative": ["212", 1],
+                        "cfg_conds": nag_video_cfg,
+                        "cfg_cond2_negative": nag_audio_cfg,
+                        "style": "regular",
+                    },
+                }
+            else:
+                w["213"] = {
+                    "class_type": "CFGGuider",
+                    "inputs": {
+                        "cfg": 1,
+                        "model": model_source,
+                        "positive": ["212", 0],
+                        "negative": ["212", 1],
+                    },
+                }
+            w["246"] = {
+                "class_type": "KSamplerSelect",
+                "inputs": {"sampler_name": "euler_cfg_pp"},
+            }
+            w["211"] = {
+                "class_type": "ManualSigmas",
+                "inputs": {"sigmas": "0.85, 0.7250, 0.4219, 0.0"},
+            }
+            w["216"] = {
+                "class_type": "RandomNoise",
+                "inputs": {"noise_seed": (seed + 1) % (2**32)},
+            }
+            w["219"] = {
+                "class_type": "SamplerCustomAdvanced",
+                "inputs": {
+                    "noise": ["216", 0],
+                    "guider": ["213", 0],
+                    "sampler": ["246", 0],
+                    "sigmas": ["211", 0],
+                    "latent_image": ["229", 0],
+                },
+            }
+
+            w["218"] = {
+                "class_type": "LTXVSeparateAVLatent",
+                "inputs": {"av_latent": ["219", 0]},
+            }
+            decode_source = "218"
 
         # ── Decode + Output ────────────────────────────────────────────
-
-        w["218"] = {
-            "class_type": "LTXVSeparateAVLatent",
-            "inputs": {"av_latent": ["219", 0]},
-        }
         w["251"] = {
             "class_type": "VAEDecodeTiled",
             "inputs": {
@@ -450,14 +551,14 @@ class ComfyUIClient:
                 "overlap": 64,
                 "temporal_size": 4096,
                 "temporal_overlap": 4,
-                "samples": ["218", 0],
+                "samples": [decode_source, 0],
                 "vae": ["236", 2],
             },
         }
         w["220"] = {
             "class_type": "LTXVAudioVAEDecode",
             "inputs": {
-                "samples": ["218", 1],
+                "samples": [decode_source, 1],
                 "audio_vae": ["221", 0],
             },
         }
@@ -500,6 +601,10 @@ class ComfyUIClient:
         i2v_strength: float = 0.7,
         img_compression: int = 28,
         guide_frames: list[tuple[str, int, float]] | None = None,
+        nag_video_cfg: float = 0.0,
+        nag_audio_cfg: float = 0.0,
+        single_pass: bool = False,
+        audio_input: str | None = None,
         progress_callback: Callable[[int, int], Any] | None = None,
     ) -> Path:
         """Generate video via ComfyUI LTX-2.3 pipeline.
@@ -510,6 +615,10 @@ class ComfyUIClient:
         guide_frames: list of (local_image_path, frame_idx, strength) tuples.
           Mutually exclusive with reference_image (I2V). Uses LTXVAddGuide nodes
           to condition on keyframe images at specific frame positions.
+
+        nag_video_cfg / nag_audio_cfg: NAG split guidance (e.g. 0.25 / 2.5).
+        single_pass: Skip stage 2 refinement for faster generation.
+        audio_input: Local path to audio file for IA2V mode.
         """
         if reference_image and guide_frames:
             raise ValueError(
@@ -532,6 +641,11 @@ class ComfyUIClient:
                 filename = await self.upload_image(img_path)
                 uploaded_guides.append((filename, frame_idx, strength))
 
+        # Upload audio if provided
+        audio_filename: str | None = None
+        if audio_input:
+            audio_filename = await self.upload_audio(audio_input)
+
         workflow = self._build_workflow(
             prompt_text=prompt_text,
             negative_prompt=negative_prompt,
@@ -546,6 +660,10 @@ class ComfyUIClient:
             i2v_strength=i2v_strength,
             img_compression=img_compression,
             guide_frames=uploaded_guides,
+            nag_video_cfg=nag_video_cfg,
+            nag_audio_cfg=nag_audio_cfg,
+            single_pass=single_pass,
+            audio_filename=audio_filename,
         )
 
         # Queue prompt with retries

@@ -476,6 +476,7 @@ into treating them as stills. A Lightricks developer confirmed this.
 - Lower CRF = more compression artifacts = more motion
 - Images sourced from actual video work "almost 100% of the time"
 - Our pipeline's `img_compression` parameter controls this (default: 28)
+- **RuneXX uses CRF 18** for maximum motion — try 18-25 if output is too static
 
 ### I2V Strength (LTXVImgToVideoInplace)
 
@@ -618,6 +619,7 @@ responds very differently to 1st-order vs 2nd-order solvers.
 
 - **"Both-pass" technique**: Use dev model + distilled LoRA at **0.5-0.6 strength in BOTH stages**.
   This allows flexible step counts (not locked to the preset ManualSigmas values)
+- Our pipeline uses **0.5** strength; RuneXX workflows use **0.6** — slightly more aggressive distillation
 - When using the **distilled base model** (not dev + distilled LoRA): **bypass** the distilled LoRA node
   entirely — it's already baked in
 - **IC-Detail LoRA**: Less necessary in 2.3 than 2.0 — skip for most workflows unless you specifically
@@ -652,12 +654,18 @@ Width/height must be divisible by 32.
 
 ### V2V Extend Any Video
 
-Based on `LTX-2.3_-_V2V_Extend_Any_Video.json` workflow (in `references/`):
-- Uses `ImageBatchExtendWithOverlap` with **25-frame overlap** and `filmic_crossfade` blending
-- Works with **any video** (not just LTX-generated) — upload an external clip and extend it
-- **Iterative**: run repeatedly for progressively longer clips
-- **Prompt steering** during extension — change the narrative direction with each iteration
-- Best for: extending stock footage, continuing scenes from other models, building long-form content
+Technique for extending any video (not just LTX-generated) with seamless blending:
+1. Load external video → extract final segment as overlap region
+2. Generate extension frames conditioned on the overlap
+3. Blend using **25-frame filmic crossfade** (gamma 2.2 for perceptual uniformity)
+4. **Iterative**: run repeatedly for progressively longer clips
+5. **Prompt steering** during extension — change the narrative direction with each iteration
+
+This requires `ImageBatchExtendWithOverlap` (KJnodes) or manual tensor blending. Standard ComfyUI
+replacement: chain `ImageConcat` nodes with alpha-blended overlap frames.
+
+Best for: extending stock footage, continuing scenes from other models, building long-form content.
+See `references/advanced-techniques.md` for full implementation details.
 
 ### Last-Frame Image-to-Video Technique
 
@@ -680,37 +688,39 @@ Shot 5 (3-5s): Final — CTA or brand moment
 
 ## Frame-Guided Workflows
 
-Reference workflows in `references/` provide several frame-guided generation modes beyond
-standard I2V. These inject reference images at specific points to control the generated video.
+Our pipeline supports frame-guided generation via the `guide_frames` parameter, which chains
+`LTXVAddGuide` nodes — no KJnodes required. This implements FL2V and FML2V natively.
 
-### FL2V — First + Last Frame Injection
+### FL2V — First + Last Frame (via `guide_frames`)
 
-**Workflow**: `LTX-2.3_-_FL2V_First_Last_Frame_Injection.json`
+Pass two guide frames at indices 0 (first) and -1 (last):
+```python
+guide_frames=[
+    ("first_frame.png", 0, 1.0),   # first frame, full strength
+    ("last_frame.png", -1, 1.0),   # last frame, full strength
+]
+```
 
-Uses `LTXVImgToVideoInplaceKJ` to inject images at the first and last frames.
 The model interpolates between the two states.
 
 - **Frames should differ** — identical first/last frames produce minimal motion
 - Controls start and end states; the model fills in the transition
 - Use cases: A-to-B transitions, morphing sequences, controlled narratives
-- Already supported by our pipeline via `guide_frames` parameter with frame indices 0 and -1
 
-### FML2V — First + Middle + Last Frame Guidance
+### FML2V — First + Middle + Last Frame (via `guide_frames`)
 
-**Workflow**: `LTX-2.3_-_FML2V_First_Middle_Last_Frame_Guider.json`
+Pass three guide frames. Use **strength 0.5** for the middle frame to allow creative freedom:
+```python
+guide_frames=[
+    ("first.png", 0, 1.0),         # first frame, full strength
+    ("middle.png", 60, 0.5),       # middle frame, flexible guidance
+    ("last.png", -1, 1.0),         # last frame, full strength
+]
+```
 
-Uses `LTXVAddGuideMulti` + `LTXVCropGuides` to provide frame guidance that modifies
-**both conditioning AND latent** (more flexible than injection).
-
-- **Strength**: 0.5 default, adjustable — frames are **guidance**, not hard constraints
-- Modifies conditioning at multiple points in the video timeline
-- More flexible than FL2V injection — allows the model creative freedom while steering
+- Frames are **guidance**, not hard constraints — strength < 1.0 allows the model to deviate
+- Our code uses `LTXVAddGuide` chaining + `LTXVCropGuides` (same approach as RuneXX FML2V workflows)
 - Use cases: consistent characters across clips, controlled scene progression, storyboarded narratives
-
-### Custom Audio Variants
-
-- `LTX-2.3_-_FL2V_Custom_Audio.json` — FL2V with custom audio input
-- `LTX-2.3_-_FML2V_Guider_Custom_Audio.json` — FML2V guider with custom audio
 
 ---
 
@@ -727,7 +737,7 @@ For memory-constrained setups or faster iteration, GGUF quantized models are ava
 - **Q4** provides a good quality/memory balance for VRAM-constrained GPUs
 - **GGUF Gemma text encoder**: `unsloth/gemma-3-12b-it-GGUF` — reduces text encoder VRAM
 - **When to use**: fast iteration, lower VRAM GPUs, batch generation
-- Reference workflow: `LTX-2.3_-_I2V_T2V_Basic_GGUF.json` in `references/`
+- Use same node graph as our standard pipeline but swap `CheckpointLoaderSimple` for GGUF loader
 
 ---
 
@@ -762,13 +772,59 @@ For 4K: 720p → 1440p → 4K (sequential 2x passes look better than single 4x).
 
 ## TextGenerateLTX2Prompt Node
 
-Converts simple descriptions into structured prompts using Gemma-3-12B as an LLM.
+**NOT a KJnode** — this is from the official `ComfyUI-LTXVideo` extension. Converts simple
+descriptions into structured prompts using Gemma-3-12B as an LLM.
 Controls: `disable_TextGenerate` (true/false), enhancer seed for variations.
 
 "Tweaking your wording in TextGenerateLTX2Prompt usually yields bigger gains than sampler tweaks."
 Useful for casual descriptions. For manually crafted prompts using the 6-element formula, bypass it.
 
 Alternative: **LTX2EasyPrompt-LD** — local uncensored LLM prompt enhancement, zero internet dependency.
+
+---
+
+## Negative Anchor Guidance (NAG)
+
+NAG applies **separate negative guidance strengths** to video and audio channels. Standard
+negative prompting applies one CFG scale to everything — NAG lets you be gentle on video
+(avoiding over-correction artifacts) while being aggressive on audio (improving clarity).
+
+**How it works** (implementable with standard ComfyUI nodes):
+1. Use `DualCFGGuider` instead of `CFGGuider` — this accepts two negative conditionings
+2. Set **video negative strength: 0.25** (very light — prevents visual over-sharpening)
+3. Set **audio negative strength: 2.5** (aggressive — cleans up audio artifacts)
+4. Set **start step: 11** (apply NAG only in later sampling steps, not from the beginning)
+
+The KJnodes `LTX2_NAG` node is just a convenience wrapper around `DualCFGGuider` with
+step-gating logic. Our pipeline could implement this by swapping `CFGGuider` for
+`DualCFGGuider` and adding a step-conditional switch.
+
+**When to use**: talking head content, dialogue-heavy clips, any generation where audio
+quality matters more than visual dynamism.
+
+---
+
+## Single-Pass Pipeline Option
+
+For fast iteration or low-VRAM setups, skip the two-stage upscale entirely:
+- Generate directly at target resolution (no half-res → upscale → refine)
+- Uses the same sampler/sigma setup as Stage 1
+- **Trade-off**: lower quality but ~2-3x faster, significantly less VRAM
+- Good for: prompt testing, draft generation, social media content where 720p is fine
+
+Not currently implemented in our backend — would require a `skip_upscale` parameter.
+
+---
+
+## LoRA Naming Note
+
+All camera LoRAs use `ltx-2-19b-*` naming (referencing the older 19B model) but are
+**confirmed compatible with the 22B LTX-2.3 model**. No 2.3-specific camera LoRAs exist yet.
+
+The three **LTX-2.3-specific LoRAs** are:
+- `ltx-2.3-22b-distilled-lora-384` — distilled inference (used by our pipeline)
+- `ltx-2.3-22b-ic-lora-union-control-ref0.5` — updated union control for 2.3
+- `ltx-2.3-22b-ic-lora-motion-track-control-ref0.5` — **NEW**: motion tracking IC-LoRA
 
 ---
 

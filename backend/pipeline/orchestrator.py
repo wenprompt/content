@@ -277,6 +277,7 @@ async def _process_job(job_id: str, app: FastAPI) -> None:
             shots = sorted(project.shots, key=lambda s: s.order_index)
 
             # Process each shot
+            prev_shot_output: Path | None = None
             for i, shot in enumerate(shots):
                 # Re-check for cancellation
                 await session.refresh(job)
@@ -312,6 +313,39 @@ async def _process_job(job_id: str, app: FastAPI) -> None:
                     "output_path": None,
                 })
 
+                # Chain shots: generate or extract reference image for I2V
+                if shot.tool == "ltx" and not shot.reference_image:
+                    refs_dir = output_dir / job.project_id / "references"
+                    refs_dir.mkdir(parents=True, exist_ok=True)
+
+                    if prev_shot_output and shot.transition_type == "last_frame":
+                        # Extract last frame from previous video
+                        ref_path = refs_dir / f"lastframe_{i:02d}.png"
+                        from backend.clients.ffmpeg_client import extract_last_frame
+                        await extract_last_frame(prev_shot_output, ref_path)
+                        shot.reference_image = str(ref_path)
+                        shot.shot_type = "image_to_video"
+                    elif i == 0 or shot.transition_type == "hard_cut":
+                        # First shot or hard cut: generate reference image
+                        try:
+                            ref_image = await _generate_reference_image(
+                                shot.prompt,
+                                shot.width,
+                                shot.height,
+                                google_client=app.state.google_client,
+                                openai_client=app.state.openai_client,
+                            )
+                            ref_path = refs_dir / f"ref_{i:02d}.png"
+                            ref_image.save(str(ref_path))
+                            shot.reference_image = str(ref_path)
+                            shot.shot_type = "image_to_video"
+                        except Exception:
+                            logger.warning(
+                                "Could not generate reference image for shot %d, "
+                                "falling back to T2V",
+                                i,
+                            )
+
                 # Generate video for this shot
                 shot_output = await _generate_shot(
                     shot=shot,
@@ -323,6 +357,7 @@ async def _process_job(job_id: str, app: FastAPI) -> None:
                 if shot_output:
                     shot.output_path = str(shot_output)
                     shot_paths.append(shot_output)
+                    prev_shot_output = shot_output
 
                 shot.status = "completed"
                 await session.commit()
@@ -331,10 +366,14 @@ async def _process_job(job_id: str, app: FastAPI) -> None:
             if shot_paths:
                 job.message = "Concatenating final video"
                 await session.commit()
+                first_shot = shots[0]
                 final_path = await concatenate_project(
                     project_id=job.project_id,
                     shot_paths=shot_paths,
                     output_dir=output_dir,
+                    width=first_shot.width,
+                    height=first_shot.height,
+                    fps=first_shot.fps,
                 )
                 job.output_path = str(final_path)
 

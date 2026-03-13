@@ -31,6 +31,8 @@ class Settings(BaseSettings):
     max_cloud_budget_per_project: float = 20.00
     ltx_cfg: float = 3.5
     ltx_steps: int = 40
+    brief_parser_provider: str = "gemini"
+    brief_parser_model: str = "gemini-2.5-flash"
 
 
 @lru_cache

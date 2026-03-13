@@ -8,8 +8,11 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 
+from backend.config import get_settings
 from backend.database import get_db
 from backend.models import Project, Shot
+from backend.pipeline.brief_parser import parse_brief
+from backend.pipeline.prompt_generator import generate_tool_prompt
 from backend.schemas import (
     ProjectCreate,
     ProjectResponse,
@@ -137,6 +140,61 @@ async def reorder_shots(project_id: str, data: ShotReorder, db: DB) -> list[Shot
 
     await db.commit()
     return [shots_by_id[sid] for sid in data.shot_ids]
+
+
+@router.post("/{project_id}/plan", response_model=ProjectResponse)
+async def plan_project(project_id: str, db: DB) -> Project:
+    result = await db.execute(
+        select(Project).where(Project.id == project_id).options(selectinload(Project.shots))
+    )
+    project = result.scalar_one_or_none()
+    if not project:
+        raise HTTPException(status_code=404, detail="Project not found")
+    if not project.description:
+        raise HTTPException(status_code=400, detail="Project description is required for planning")
+
+    settings = get_settings()
+    provider = settings.brief_parser_provider
+    api_key = settings.gemini_api_key if provider == "gemini" else settings.openai_api_key
+    if not api_key:
+        raise HTTPException(status_code=400, detail=f"API key for {provider} is not configured")
+
+    # Delete existing shots
+    for shot in list(project.shots):
+        await db.delete(shot)
+    await db.flush()
+
+    # Parse brief and generate prompts
+    shot_plans = await parse_brief(project, provider, api_key, settings.brief_parser_model)
+
+    for plan in shot_plans:
+        tool_prompt = generate_tool_prompt(plan, project)
+        shot = Shot(
+            project_id=project_id,
+            order_index=plan.order_index,
+            name=plan.name,
+            shot_type=plan.shot_type,
+            tool=plan.tool,
+            prompt=tool_prompt.prompt,
+            negative_prompt=tool_prompt.negative_prompt,
+            duration=plan.duration,
+            width=plan.width,
+            height=plan.height,
+            lora_name=tool_prompt.lora_name,
+            lora_strength=tool_prompt.lora_strength,
+            transition_type=plan.transition_type,
+        )
+        db.add(shot)
+
+    project.status = "planned"
+    await db.commit()
+
+    # Expire cached state so selectinload picks up new shots
+    db.expire_all()
+    result = await db.execute(
+        select(Project).where(Project.id == project_id).options(selectinload(Project.shots))
+    )
+    return result.scalar_one()
 
 
 @router.put("/{project_id}/shots/{shot_id}", response_model=ShotResponse)

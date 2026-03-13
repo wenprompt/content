@@ -114,7 +114,7 @@ async def concatenate_videos(paths: list[str | Path], output: str | Path) -> Pat
         mode="w", suffix=".txt", delete=False
     ) as f:
         for p in paths:
-            f.write(f"file '{Path(p).as_posix()}'\n")
+            f.write(f"file '{Path(p).resolve().as_posix()}'\n")
         concat_file = f.name
 
     try:

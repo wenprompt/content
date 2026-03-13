@@ -52,6 +52,10 @@ ignore_missing_imports = true
 [tool.pytest.ini_options]
 asyncio_mode = "auto"
 testpaths = ["tests"]
+markers = [
+    "integration: end-to-end tests requiring live services (Gemini, ComfyUI). Run with: uv run pytest -m integration",
+]
+addopts = "-m 'not integration'"
 filterwarnings = [
     "ignore::DeprecationWarning:sqlalchemy.*",
 ]

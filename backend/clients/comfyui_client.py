@@ -184,10 +184,11 @@ class ComfyUIClient:
             "class_type": "CLIPTextEncode",
             "inputs": {
                 "text": negative_prompt
-                or "pc game, console game, video game, cartoon, childish, ugly",
+                or "worst quality, low quality, blurry, distorted, watermark, text, logo, shaky, glitchy, deformed, morphing, warping, flicker",
                 "clip": ["243", 0],
             },
         }
+
         w["239"] = {
             "class_type": "LTXVConditioning",
             "inputs": {

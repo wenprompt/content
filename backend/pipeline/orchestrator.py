@@ -1,16 +1,24 @@
-import asyncio
+from __future__ import annotations
+
 import logging
 import shutil
 from datetime import UTC, datetime
 from pathlib import Path
+from typing import TYPE_CHECKING
 
-from fastapi import FastAPI
+from PIL import Image
 from sqlalchemy import select
 from sqlalchemy.orm import selectinload
 
 from backend.api.websocket import manager
-from backend.clients.comfyui_client import ComfyUIClient
 from backend.config import get_settings
+
+if TYPE_CHECKING:
+    from fastapi import FastAPI
+
+    from backend.clients.comfyui_client import ComfyUIClient
+    from backend.clients.google_client import GoogleClient
+    from backend.clients.openai_client import OpenAIClient
 from backend.database import async_session
 from backend.models import Job, Project, Shot
 from backend.pipeline.concatenator import concatenate_project
@@ -29,16 +37,82 @@ def _duration_to_frames(duration_sec: float, fps: int = 24) -> int:
     return max(base, 9)  # minimum 9 frames
 
 
+def _dimensions_to_aspect(width: int, height: int) -> str:
+    """Convert pixel dimensions to an aspect ratio string."""
+    ratio = width / height
+    if ratio > 1.5:
+        return "16:9"
+    elif ratio < 0.7:
+        return "9:16"
+    elif abs(ratio - 1.0) < 0.1:
+        return "1:1"
+    elif ratio > 1.0:
+        return "4:3"
+    else:
+        return "3:4"
+
+
+def _dimensions_to_resolution(width: int, height: int) -> str:
+    """Convert pixel dimensions to a resolution string for OpenAI."""
+    short_side = min(width, height)
+    if short_side >= 1080:
+        return "1080p"
+    elif short_side >= 720:
+        return "720p"
+    return "480p"
+
+
+def _dimensions_to_openai_size(width: int, height: int) -> str:
+    """Convert pixel dimensions to an OpenAI size string."""
+    ratio = width / height
+    if ratio > 1.2:
+        return "1536x1024"
+    elif ratio < 0.8:
+        return "1024x1536"
+    return "1024x1024"
+
+
+async def _generate_reference_image(
+    prompt: str,
+    width: int,
+    height: int,
+    google_client: GoogleClient | None,
+    openai_client: OpenAIClient | None,
+) -> Image.Image:
+    """Generate a reference image for I2V using the configured default image tool."""
+    import io
+
+    settings = get_settings()
+
+    if settings.default_image_tool == "gpt_image":
+        if openai_client is None:
+            raise RuntimeError("OpenAI API key not configured")
+        result = await openai_client.generate_image(
+            prompt=prompt,
+            size=_dimensions_to_openai_size(width, height),
+        )
+    else:
+        # Default: nano_banana (Google)
+        if google_client is None:
+            raise RuntimeError("Google API key not configured")
+        result = await google_client.generate_image(
+            prompt=prompt,
+            aspect_ratio=_dimensions_to_aspect(width, height),
+        )
+
+    return Image.open(io.BytesIO(result.data))
+
+
 async def _generate_shot(
     shot: Shot,
     shot_index: int,
     job: Job,
     output_dir: Path,
+    app: FastAPI,
 ) -> Path | None:
     """Generate video for a single shot. Returns output path or None."""
     if shot.tool == "ltx":
-        settings = get_settings()
-        comfyui = ComfyUIClient(settings.comfyui_url)
+        comfyui: ComfyUIClient = app.state.comfyui_client
 
         async def _progress_cb(step: int, total: int) -> None:
             shot_progress = (step / total) * 100
@@ -75,9 +149,78 @@ async def _generate_shot(
         shutil.copy2(video_path, shot_output)
         return shot_output
 
-    # Phase 5 will add veo/sora routing
-    await asyncio.sleep(1.0)
-    return None
+    elif shot.tool == "veo":
+        google = app.state.google_client
+        if google is None:
+            raise RuntimeError("Google API key not configured")
+
+        async def _veo_progress_cb(current: int, total: int) -> None:
+            await manager.broadcast({
+                "type": "shot_step_progress",
+                "job_id": job.id,
+                "project_id": job.project_id,
+                "current_shot_index": shot_index,
+                "step": current,
+                "total_steps": total,
+                "shot_progress": (current / total) * 100 if total else 0,
+            })
+
+        # Generate reference image if I2V but no reference provided
+        ref_image = None
+        if shot.shot_type == "image_to_video" and not shot.reference_image:
+            ref_image = await _generate_reference_image(
+                shot.prompt, shot.width, shot.height,
+                google_client=app.state.google_client,
+                openai_client=app.state.openai_client,
+            )
+        elif shot.reference_image:
+            ref_image = Image.open(shot.reference_image)
+
+        result = await google.generate_video(
+            prompt=shot.prompt,
+            image=ref_image,
+            duration=int(shot.duration),
+            aspect_ratio=_dimensions_to_aspect(shot.width, shot.height),
+            progress_callback=_veo_progress_cb,
+        )
+
+        project_dir = output_dir / job.project_id / "shots"
+        project_dir.mkdir(parents=True, exist_ok=True)
+        shot_output = project_dir / f"shot_{shot_index:02d}.mp4"
+        shot_output.write_bytes(result.data)
+        return shot_output
+
+    elif shot.tool == "sora":
+        openai_client = app.state.openai_client
+        if openai_client is None:
+            raise RuntimeError("OpenAI API key not configured")
+
+        async def _sora_progress_cb(current: int, total: int) -> None:
+            await manager.broadcast({
+                "type": "shot_step_progress",
+                "job_id": job.id,
+                "project_id": job.project_id,
+                "current_shot_index": shot_index,
+                "step": current,
+                "total_steps": total,
+                "shot_progress": (current / total) * 100 if total else 0,
+            })
+
+        result = await openai_client.generate_video(
+            prompt=shot.prompt,
+            duration=int(shot.duration),
+            resolution=_dimensions_to_resolution(shot.width, shot.height),
+            progress_callback=_sora_progress_cb,
+        )
+
+        project_dir = output_dir / job.project_id / "shots"
+        project_dir.mkdir(parents=True, exist_ok=True)
+        shot_output = project_dir / f"shot_{shot_index:02d}.mp4"
+        shot_output.write_bytes(result.data)
+        return shot_output
+
+    else:
+        raise ValueError(f"Unknown tool: {shot.tool!r}")
 
 
 async def process_job_queue(app: FastAPI) -> None:
@@ -85,14 +228,14 @@ async def process_job_queue(app: FastAPI) -> None:
     while True:
         job_id: str = await app.state.job_queue.get()
         try:
-            await _process_job(job_id)
+            await _process_job(job_id, app)
         except Exception:
             logger.exception("Unhandled error in job worker for job %s", job_id)
         finally:
             app.state.job_queue.task_done()
 
 
-async def _process_job(job_id: str) -> None:
+async def _process_job(job_id: str, app: FastAPI) -> None:
     async with async_session() as session:
         # Load job
         result = await session.execute(select(Job).where(Job.id == job_id))
@@ -175,6 +318,7 @@ async def _process_job(job_id: str) -> None:
                     shot_index=i,
                     job=job,
                     output_dir=output_dir,
+                    app=app,
                 )
                 if shot_output:
                     shot.output_path = str(shot_output)

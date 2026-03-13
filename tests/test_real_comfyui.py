@@ -13,6 +13,7 @@ from backend.clients.comfyui_client import ComfyUIClient
 COMFYUI_URL = "http://127.0.0.1:8188"
 # Use coca.png as the standard test image (committed to repo)
 TEST_IMG = Path(__file__).resolve().parent.parent / "docs" / "coca.png"
+TEST_IMG2 = Path(__file__).resolve().parent.parent / "docs" / "coca2.png"
 
 
 @pytest.fixture
@@ -95,6 +96,44 @@ class TestRealGuideFrames:
             fps=24,
             guide_frames=[
                 (str(TEST_IMG), 0, 1.0),  # first frame
+            ],
+            progress_callback=on_progress,
+        )
+        print(f"  Output: {result}")
+
+        assert result.exists(), f"Output file not found: {result}"
+        assert result.stat().st_size > 1000, "Output file too small"
+        assert len(progress_steps) > 0, "No progress callbacks received"
+        print(f"  File size: {result.stat().st_size:,} bytes")
+        print(f"  Progress steps: {len(progress_steps)}")
+
+    async def test_first_and_last_frame_guide(self, client: ComfyUIClient) -> None:
+        """Generate video with first and last frame guides (coca.png + coca2.png)."""
+        assert TEST_IMG.exists(), f"Test image not found: {TEST_IMG}"
+        assert TEST_IMG2.exists(), f"Test image not found: {TEST_IMG2}"
+
+        progress_steps: list[tuple[int, int]] = []
+
+        async def on_progress(step: int, total: int) -> None:
+            progress_steps.append((step, total))
+            print(f"  Guide progress: {step}/{total}")
+
+        print("\n--- Starting guide frame generation (first + last frame) ---")
+        result = await client.generate_video(
+            prompt_text=(
+                "A Coca-Cola can slowly rotates on a glossy surface, "
+                "revealing the iconic red label and white script logo. "
+                "Condensation droplets glisten under warm studio lighting, "
+                "smooth slow rotation, product commercial, cinematic"
+            ),
+            width=768,
+            height=512,
+            num_frames=121,
+            seed=42,
+            fps=24,
+            guide_frames=[
+                (str(TEST_IMG), 0, 1.0),   # first frame
+                (str(TEST_IMG2), -1, 1.0),  # last frame
             ],
             progress_callback=on_progress,
         )

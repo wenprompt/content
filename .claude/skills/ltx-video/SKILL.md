@@ -63,6 +63,21 @@ than LTX-2's. It follows complex instructions much better than previous versions
 **Longer, more descriptive prompts consistently outperform short ones.**
 **Use present-tense verbs exclusively.**
 
+### Film Director Mindset
+
+Think **chronologically**, not statically. LTX-2.3 is extremely prompt-sensitive — static descriptions
+produce static videos. Describe what **happens over time**, not just what the scene looks like.
+
+- Write as a sequence of events: "She picks up the cup, takes a sip, then sets it down"
+- **Double-confirm important actions**: "the woman talks to the viewer, she says: ..." reinforces intent
+- **Small 1-2 word changes drastically alter results** — LTX-2.3 is more sensitive than Wan/Sora
+- For longer clips (10s+), use **timestamp-based prompting**:
+  ```
+  0-4 sec: A barista grinds coffee beans, the grinder whirring loudly.
+  4-8 sec: She pours steaming water over the grounds in a slow spiral.
+  8-12 sec: The camera pushes in as latte art forms in the cup.
+  ```
+
 ### The 6-Element Prompt Formula
 
 Every effective LTX-2.3 prompt covers these elements in 4-8 sentences:
@@ -539,6 +554,32 @@ For detailed LoRA reference (filenames, IC-LoRAs, stacking rules): `references/c
 
 ---
 
+## Sampler Selection Guide
+
+Sampler choice is the **#1 technical quality factor** for LTX-2.3. The Rectified Flow architecture
+responds very differently to 1st-order vs 2nd-order solvers.
+
+### Sampler Rankings (Community-Tested)
+
+| Stage 1 Sampler | Stage 2 Sampler | Quality | Notes |
+|----------------|----------------|---------|-------|
+| **`euler_ancestral_cfg_pp`** | **`euler_cfg_pp`** | **Best** | Official LTX recommendation, natural motion |
+| `lcm` | `lcm` | Good | Soft-focus aesthetic, fastest |
+| `euler` | `euler` | Decent | Stable but less dynamic |
+| `res_2s` | `res_2s` | **Avoid** | Slow-motion artifact, over-baked look |
+| `euler_ancestral` | `euler_ancestral` | **Avoid** | Temporal flickering, unstable |
+
+### Why This Matters
+
+- **1st-order solvers** (`euler`, `euler_ancestral`) follow the flow field directly — simpler, faster
+- **2nd-order solvers** (`res_2s`, `dpmpp_2s`) estimate the midpoint — more accurate per step but can
+  over-correct with LTX's distilled sigmas, causing the "slow-motion" artifact
+- **`_cfg_pp` variants** apply classifier-free guidance as a post-processing step rather than inline,
+  which prevents the contrast burn that standard CFG causes at low step counts
+- The pipeline uses `euler_ancestral_cfg_pp` (stage 1) + `euler_cfg_pp` (stage 2) by default
+
+---
+
 ## Key Parameters
 
 ### Dev Pipeline (Full Quality)
@@ -573,6 +614,15 @@ For detailed LoRA reference (filenames, IC-LoRAs, stacking rules): `references/c
 - Social media content
 - As Stage 2 refiner on top of dev Stage 1
 
+### Distilled LoRA Techniques
+
+- **"Both-pass" technique**: Use dev model + distilled LoRA at **0.5-0.6 strength in BOTH stages**.
+  This allows flexible step counts (not locked to the preset ManualSigmas values)
+- When using the **distilled base model** (not dev + distilled LoRA): **bypass** the distilled LoRA node
+  entirely — it's already baked in
+- **IC-Detail LoRA**: Less necessary in 2.3 than 2.0 — skip for most workflows unless you specifically
+  need fine detail enhancement
+
 ### Resolution & Duration Planning
 
 | Content Type | Resolution | FPS | Duration | Notes |
@@ -600,6 +650,15 @@ Width/height must be divisible by 32.
 
 **Recommended overlap**: **73 frames** (3s at 25fps). Minimum: 25 frames.
 
+### V2V Extend Any Video
+
+Based on `LTX-2.3_-_V2V_Extend_Any_Video.json` workflow (in `references/`):
+- Uses `ImageBatchExtendWithOverlap` with **25-frame overlap** and `filmic_crossfade` blending
+- Works with **any video** (not just LTX-generated) — upload an external clip and extend it
+- **Iterative**: run repeatedly for progressively longer clips
+- **Prompt steering** during extension — change the narrative direction with each iteration
+- Best for: extending stock footage, continuing scenes from other models, building long-form content
+
 ### Last-Frame Image-to-Video Technique
 
 For transitions between different scenes:
@@ -616,6 +675,70 @@ Shot 3 (3-5s): Close-up — highlights key detail
 Shot 4 (5-10s): Action/demo — tells the story
 Shot 5 (3-5s): Final — CTA or brand moment
 ```
+
+---
+
+## Frame-Guided Workflows
+
+Reference workflows in `references/` provide several frame-guided generation modes beyond
+standard I2V. These inject reference images at specific points to control the generated video.
+
+### FL2V — First + Last Frame Injection
+
+**Workflow**: `LTX-2.3_-_FL2V_First_Last_Frame_Injection.json`
+
+Uses `LTXVImgToVideoInplaceKJ` to inject images at the first and last frames.
+The model interpolates between the two states.
+
+- **Frames should differ** — identical first/last frames produce minimal motion
+- Controls start and end states; the model fills in the transition
+- Use cases: A-to-B transitions, morphing sequences, controlled narratives
+- Already supported by our pipeline via `guide_frames` parameter with frame indices 0 and -1
+
+### FML2V — First + Middle + Last Frame Guidance
+
+**Workflow**: `LTX-2.3_-_FML2V_First_Middle_Last_Frame_Guider.json`
+
+Uses `LTXVAddGuideMulti` + `LTXVCropGuides` to provide frame guidance that modifies
+**both conditioning AND latent** (more flexible than injection).
+
+- **Strength**: 0.5 default, adjustable — frames are **guidance**, not hard constraints
+- Modifies conditioning at multiple points in the video timeline
+- More flexible than FL2V injection — allows the model creative freedom while steering
+- Use cases: consistent characters across clips, controlled scene progression, storyboarded narratives
+
+### Custom Audio Variants
+
+- `LTX-2.3_-_FL2V_Custom_Audio.json` — FL2V with custom audio input
+- `LTX-2.3_-_FML2V_Guider_Custom_Audio.json` — FML2V guider with custom audio
+
+---
+
+## GGUF Model Options
+
+For memory-constrained setups or faster iteration, GGUF quantized models are available:
+
+| Source | Model | Notes |
+|--------|-------|-------|
+| QuantStack | Q4/Q5/Q8 variants | Good quality balance |
+| Unsloth | Various quantizations | Popular choice |
+| Vantage | HuggingFace hosted | Easy download |
+
+- **Q4** provides a good quality/memory balance for VRAM-constrained GPUs
+- **GGUF Gemma text encoder**: `unsloth/gemma-3-12b-it-GGUF` — reduces text encoder VRAM
+- **When to use**: fast iteration, lower VRAM GPUs, batch generation
+- Reference workflow: `LTX-2.3_-_I2V_T2V_Basic_GGUF.json` in `references/`
+
+---
+
+## Temporal Upscaling
+
+- `ltx-2.3-temporal-upscaler-x2-1.0` converts **25fps → 50fps**
+- Improves smoothness and fine detail (teeth, hair, fabric edges)
+- **Optional** — 24-25fps is more cinematic for most content
+- Good for slow-motion post-processing: generate at 25fps, temporally upscale to 50fps,
+  then conform to 25fps for 2x slow-motion effect
+- Apply after spatial upscaling in the pipeline
 
 ---
 

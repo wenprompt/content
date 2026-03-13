@@ -91,9 +91,18 @@ class TestWebSocketEndpoint:
 
             # Run the worker in a background thread to process the queued job
             async def _run_worker() -> None:
+                from types import SimpleNamespace
+                from unittest.mock import MagicMock
                 from unittest.mock import patch as _patch
 
                 from backend.pipeline.orchestrator import _process_job
+
+                mock_app = MagicMock()
+                mock_app.state = SimpleNamespace(
+                    comfyui_client=MagicMock(),
+                    google_client=MagicMock(),
+                    openai_client=MagicMock(),
+                )
 
                 with _patch(
                     "backend.pipeline.orchestrator.async_session", db_session
@@ -105,7 +114,7 @@ class TestWebSocketEndpoint:
                     "backend.pipeline.orchestrator.concatenate_project",
                     new_callable=AsyncMock,
                 ):
-                    await _process_job(job_id)
+                    await _process_job(job_id, mock_app)
 
             worker_thread = threading.Thread(
                 target=lambda: asyncio.run(_run_worker())

@@ -205,7 +205,7 @@ class TestBuildWorkflow:
             prompt_text="test", negative_prompt="", width=1280,
             height=720, num_frames=121, seed=42, fps=24,
         )
-        assert "ugly" in w["247"]["inputs"]["text"]
+        assert "worst quality" in w["247"]["inputs"]["text"]
 
     def test_seed_propagation(self, client: ComfyUIClient) -> None:
         w = client._build_workflow(
@@ -238,6 +238,7 @@ class TestBuildWorkflow:
             height=720, num_frames=121, seed=42, fps=24,
         )
         assert "234" not in w
+        # Without camera LoRA, CFGGuiders connect directly to model source
         assert w["231"]["inputs"]["model"] == ["232", 0]
         assert w["213"]["inputs"]["model"] == ["232", 0]
 
@@ -251,6 +252,7 @@ class TestBuildWorkflow:
         assert w["234"]["class_type"] == "LoraLoaderModelOnly"
         assert w["234"]["inputs"]["model"] == ["232", 0]
         assert w["234"]["inputs"]["strength_model"] == 0.85
+        # CFGGuiders take camera LoRA output
         assert w["231"]["inputs"]["model"] == ["234", 0]
         assert w["213"]["inputs"]["model"] == ["234", 0]
 

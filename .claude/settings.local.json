@@ -4,7 +4,9 @@
       "Bash(find:*)",
       "mcp__context7__resolve-library-id",
       "mcp__context7__query-docs",
-      "WebSearch"
+      "WebSearch",
+      "WebFetch(domain:ltx.io)",
+      "Bash(uv run:*)"
     ]
   }
 }

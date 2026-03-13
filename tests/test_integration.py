@@ -7,7 +7,8 @@ Each test class groups related endpoints. Tests within a class are independent
 import asyncio
 import json
 import threading
-from unittest.mock import AsyncMock, patch
+from types import SimpleNamespace
+from unittest.mock import AsyncMock, MagicMock, patch
 
 from httpx import AsyncClient
 from sqlalchemy import select
@@ -473,6 +474,13 @@ class TestEndToEndPipeline:
             async def _run_worker() -> None:
                 from backend.pipeline.orchestrator import _process_job
 
+                mock_app = MagicMock()
+                mock_app.state = SimpleNamespace(
+                    comfyui_client=MagicMock(),
+                    google_client=MagicMock(),
+                    openai_client=MagicMock(),
+                )
+
                 with patch(
                     "backend.pipeline.orchestrator.async_session", db_session
                 ), patch(
@@ -482,8 +490,8 @@ class TestEndToEndPipeline:
                 ), patch(
                     "backend.pipeline.orchestrator.concatenate_project",
                     new_callable=AsyncMock,
-):
-                    await _process_job(job_id)
+                ):
+                    await _process_job(job_id, mock_app)
 
             worker_thread = threading.Thread(
                 target=lambda: asyncio.run(_run_worker())
@@ -532,6 +540,13 @@ class TestEndToEndPipeline:
             async def _run_worker() -> None:
                 from backend.pipeline.orchestrator import _process_job
 
+                mock_app = MagicMock()
+                mock_app.state = SimpleNamespace(
+                    comfyui_client=MagicMock(),
+                    google_client=MagicMock(),
+                    openai_client=MagicMock(),
+                )
+
                 call_count = 0
 
                 async def _cancel_mid(*args: object, **kwargs: object) -> None:
@@ -555,7 +570,7 @@ class TestEndToEndPipeline:
                     "backend.pipeline.orchestrator.concatenate_project",
                     new_callable=AsyncMock,
                 ):
-                    await _process_job(job_id)
+                    await _process_job(job_id, mock_app)
 
             worker_thread = threading.Thread(
                 target=lambda: asyncio.run(_run_worker())
@@ -599,6 +614,13 @@ class TestEndToEndPipeline:
             async def _run_worker() -> None:
                 from backend.pipeline.orchestrator import _process_job
 
+                mock_app = MagicMock()
+                mock_app.state = SimpleNamespace(
+                    comfyui_client=MagicMock(),
+                    google_client=MagicMock(),
+                    openai_client=MagicMock(),
+                )
+
                 with patch(
                     "backend.pipeline.orchestrator.async_session", db_session
                 ), patch(
@@ -608,11 +630,11 @@ class TestEndToEndPipeline:
                 ), patch(
                     "backend.pipeline.orchestrator.concatenate_project",
                     new_callable=AsyncMock,
-), patch(
+                ), patch(
                     "backend.pipeline.orchestrator.manager.broadcast",
                     side_effect=_capture_broadcast,
                 ):
-                    await _process_job(job_id)
+                    await _process_job(job_id, mock_app)
 
             worker_thread = threading.Thread(
                 target=lambda: asyncio.run(_run_worker())

@@ -10,6 +10,10 @@ from fastapi.middleware.cors import CORSMiddleware
 from backend.api.jobs import router as jobs_router
 from backend.api.projects import router as projects_router
 from backend.api.websocket import router as ws_router
+from backend.clients.comfyui_client import ComfyUIClient
+from backend.clients.google_client import GoogleClient
+from backend.clients.openai_client import OpenAIClient
+from backend.config import get_settings
 from backend.database import init_db
 from backend.pipeline.orchestrator import process_job_queue
 
@@ -20,6 +24,15 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None]:
     await init_db()
     app.state.http_client = httpx.AsyncClient(timeout=60.0)
     app.state.job_queue = asyncio.Queue[str]()
+
+    settings = get_settings()
+    app.state.comfyui_client = ComfyUIClient(settings.comfyui_url)
+    app.state.google_client = (
+        GoogleClient(api_key=settings.gemini_api_key) if settings.gemini_api_key else None
+    )
+    app.state.openai_client = (
+        OpenAIClient(api_key=settings.openai_api_key) if settings.openai_api_key else None
+    )
 
     worker_task = asyncio.create_task(process_job_queue(app))
     yield

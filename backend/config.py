@@ -12,8 +12,6 @@ class Settings(BaseSettings):
 
     # Google APIs
     gemini_api_key: str = ""
-    gcs_bucket: str = ""
-    google_application_credentials: str = ""
 
     # OpenAI
     openai_api_key: str = ""

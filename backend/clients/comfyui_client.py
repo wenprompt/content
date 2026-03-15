@@ -215,8 +215,11 @@ class ComfyUIClient:
         w["247"] = {
             "class_type": "CLIPTextEncode",
             "inputs": {
-                "text": negative_prompt
-                or "worst quality, low quality, blurry, distorted, watermark, text, logo, shaky, glitchy, deformed, morphing, warping, flicker",
+                "text": negative_prompt or (
+                    "worst quality, low quality, blurry, distorted,"
+                    " watermark, text, logo, shaky, glitchy,"
+                    " deformed, morphing, warping, flicker"
+                ),
                 "clip": ["243", 0],
             },
         }

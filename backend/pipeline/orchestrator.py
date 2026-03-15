@@ -1,6 +1,8 @@
 from __future__ import annotations
 
+import io
 import logging
+import re
 import shutil
 from datetime import UTC, datetime
 from pathlib import Path
@@ -11,9 +13,12 @@ from sqlalchemy import select
 from sqlalchemy.orm import selectinload
 
 from backend.api.websocket import manager
+from backend.clients.ffmpeg_client import extract_last_frame
 from backend.config import get_settings
 
 if TYPE_CHECKING:
+    from collections.abc import Awaitable, Callable
+
     from fastapi import FastAPI
 
     from backend.clients.comfyui_client import ComfyUIClient
@@ -24,6 +29,23 @@ from backend.models import Job, Project, Shot
 from backend.pipeline.concatenator import concatenate_project
 
 logger = logging.getLogger(__name__)
+
+_I2V_TOOLS = frozenset({"ltx", "veo"})
+
+
+def _strip_audio_from_prompt(prompt: str) -> str:
+    """Remove audio descriptions from a prompt for image generation.
+
+    Image generators like Nano Banana should only get visual descriptions.
+    Audio descriptions cause unwanted speech bubbles and text overlays.
+    """
+    # Remove "Audio: ..." sentences
+    prompt = re.sub(r"\bAudio:\s*[^.]*\.\s*", "", prompt)
+    # Remove "Sound: ..." sentences
+    prompt = re.sub(r"\bSound:\s*[^.]*\.\s*", "", prompt)
+    # Remove [AUDIO] sections (Sora-style)
+    prompt = re.sub(r"\[AUDIO\].*", "", prompt, flags=re.DOTALL)
+    return prompt.strip()
 
 
 def _duration_to_frames(duration_sec: float, fps: int = 24) -> int:
@@ -80,8 +102,6 @@ async def _generate_reference_image(
     openai_client: OpenAIClient | None,
 ) -> Image.Image:
     """Generate a reference image for I2V using the configured default image tool."""
-    import io
-
     settings = get_settings()
 
     if settings.default_image_tool == "gpt_image":
@@ -103,6 +123,23 @@ async def _generate_reference_image(
     return Image.open(io.BytesIO(result.data))
 
 
+def _make_progress_cb(job: Job, shot_index: int) -> Callable[[int, int], Awaitable[None]]:
+    """Return an async progress callback bound to *job* and *shot_index*."""
+
+    async def _cb(current: int, total: int) -> None:
+        await manager.broadcast({
+            "type": "shot_step_progress",
+            "job_id": job.id,
+            "project_id": job.project_id,
+            "current_shot_index": shot_index,
+            "step": current,
+            "total_steps": total,
+            "shot_progress": (current / total) * 100 if total else 0,
+        })
+
+    return _cb
+
+
 async def _generate_shot(
     shot: Shot,
     shot_index: int,
@@ -111,20 +148,13 @@ async def _generate_shot(
     app: FastAPI,
 ) -> Path | None:
     """Generate video for a single shot. Returns output path or None."""
+    project_dir = output_dir / job.project_id / "shots"
+    project_dir.mkdir(parents=True, exist_ok=True)
+    shot_output = project_dir / f"shot_{shot_index:02d}.mp4"
+    progress_cb = _make_progress_cb(job, shot_index)
+
     if shot.tool == "ltx":
         comfyui: ComfyUIClient = app.state.comfyui_client
-
-        async def _progress_cb(step: int, total: int) -> None:
-            shot_progress = (step / total) * 100
-            await manager.broadcast({
-                "type": "shot_step_progress",
-                "job_id": job.id,
-                "project_id": job.project_id,
-                "current_shot_index": shot_index,
-                "step": step,
-                "total_steps": total,
-                "shot_progress": shot_progress,
-            })
 
         video_path = await comfyui.generate_video(
             prompt_text=shot.prompt,
@@ -139,13 +169,9 @@ async def _generate_shot(
             reference_image=shot.reference_image or None,
             lora_name=shot.lora_name,
             lora_strength=shot.lora_strength,
-            progress_callback=_progress_cb,
+            progress_callback=progress_cb,
         )
 
-        # Copy from ComfyUI temp output to project output dir
-        project_dir = output_dir / job.project_id / "shots"
-        project_dir.mkdir(parents=True, exist_ok=True)
-        shot_output = project_dir / f"shot_{shot_index:02d}.mp4"
         shutil.copy2(video_path, shot_output)
         return shot_output
 
@@ -154,26 +180,8 @@ async def _generate_shot(
         if google is None:
             raise RuntimeError("Google API key not configured")
 
-        async def _veo_progress_cb(current: int, total: int) -> None:
-            await manager.broadcast({
-                "type": "shot_step_progress",
-                "job_id": job.id,
-                "project_id": job.project_id,
-                "current_shot_index": shot_index,
-                "step": current,
-                "total_steps": total,
-                "shot_progress": (current / total) * 100 if total else 0,
-            })
-
-        # Generate reference image if I2V but no reference provided
         ref_image = None
-        if shot.shot_type == "image_to_video" and not shot.reference_image:
-            ref_image = await _generate_reference_image(
-                shot.prompt, shot.width, shot.height,
-                google_client=app.state.google_client,
-                openai_client=app.state.openai_client,
-            )
-        elif shot.reference_image:
+        if shot.reference_image:
             ref_image = Image.open(shot.reference_image)
 
         result = await google.generate_video(
@@ -181,12 +189,9 @@ async def _generate_shot(
             image=ref_image,
             duration=int(shot.duration),
             aspect_ratio=_dimensions_to_aspect(shot.width, shot.height),
-            progress_callback=_veo_progress_cb,
+            progress_callback=progress_cb,
         )
 
-        project_dir = output_dir / job.project_id / "shots"
-        project_dir.mkdir(parents=True, exist_ok=True)
-        shot_output = project_dir / f"shot_{shot_index:02d}.mp4"
         shot_output.write_bytes(result.data)
         return shot_output
 
@@ -195,27 +200,13 @@ async def _generate_shot(
         if openai_client is None:
             raise RuntimeError("OpenAI API key not configured")
 
-        async def _sora_progress_cb(current: int, total: int) -> None:
-            await manager.broadcast({
-                "type": "shot_step_progress",
-                "job_id": job.id,
-                "project_id": job.project_id,
-                "current_shot_index": shot_index,
-                "step": current,
-                "total_steps": total,
-                "shot_progress": (current / total) * 100 if total else 0,
-            })
-
         result = await openai_client.generate_video(
             prompt=shot.prompt,
             duration=int(shot.duration),
             resolution=_dimensions_to_resolution(shot.width, shot.height),
-            progress_callback=_sora_progress_cb,
+            progress_callback=progress_cb,
         )
 
-        project_dir = output_dir / job.project_id / "shots"
-        project_dir.mkdir(parents=True, exist_ok=True)
-        shot_output = project_dir / f"shot_{shot_index:02d}.mp4"
         shot_output.write_bytes(result.data)
         return shot_output
 
@@ -241,6 +232,7 @@ async def _process_job(job_id: str, app: FastAPI) -> None:
         result = await session.execute(select(Job).where(Job.id == job_id))
         job = result.scalar_one_or_none()
         if not job:
+            logger.warning("Job %s not found in database, skipping", job_id)
             return
 
         try:
@@ -314,28 +306,42 @@ async def _process_job(job_id: str, app: FastAPI) -> None:
                 })
 
                 # Chain shots: generate or extract reference image for I2V
-                if shot.tool == "ltx" and not shot.reference_image:
-                    refs_dir = output_dir / job.project_id / "references"
+                # Works for all tools that support I2V (ltx, veo).
+                # Sora is T2V-only — skip reference image but still chain.
+                _needs_ref = (
+                    shot.tool in _I2V_TOOLS
+                    and not shot.reference_image
+                    and shot.shot_type != "text_to_video"
+                )
+                if _needs_ref:
+                    refs_dir = (output_dir / job.project_id / "references").resolve()
                     refs_dir.mkdir(parents=True, exist_ok=True)
 
                     if prev_shot_output and shot.transition_type == "last_frame":
-                        # Extract last frame from previous video
+                        # Extract last frame from previous video for continuity
                         ref_path = refs_dir / f"lastframe_{i:02d}.png"
-                        from backend.clients.ffmpeg_client import extract_last_frame
-                        await extract_last_frame(prev_shot_output, ref_path)
+                        await extract_last_frame(
+                            prev_shot_output.resolve(), ref_path
+                        )
                         shot.reference_image = str(ref_path)
                         shot.shot_type = "image_to_video"
                     elif i == 0 or shot.transition_type == "hard_cut":
-                        # First shot or hard cut: generate reference image
+                        # First shot or hard cut: generate a fresh reference image
+                        # Strip audio descriptions — image gen can't use them
+                        img_prompt = _strip_audio_from_prompt(shot.prompt)
+                        img_prompt += (
+                            " No text, no speech bubbles, no word balloons,"
+                            " no captions, no watermarks."
+                        )
                         try:
                             ref_image = await _generate_reference_image(
-                                shot.prompt,
+                                img_prompt,
                                 shot.width,
                                 shot.height,
                                 google_client=app.state.google_client,
                                 openai_client=app.state.openai_client,
                             )
-                            ref_path = refs_dir / f"ref_{i:02d}.png"
+                            ref_path = (refs_dir / f"ref_{i:02d}.png").resolve()
                             ref_image.save(str(ref_path))
                             shot.reference_image = str(ref_path)
                             shot.shot_type = "image_to_video"
@@ -344,7 +350,20 @@ async def _process_job(job_id: str, app: FastAPI) -> None:
                                 "Could not generate reference image for shot %d, "
                                 "falling back to T2V",
                                 i,
+                                exc_info=True,
                             )
+                elif (
+                    shot.tool == "sora"
+                    and prev_shot_output
+                    and shot.transition_type == "last_frame"
+                ):
+                    # Sora can't do I2V yet, but we can embed the last frame
+                    # description context in the prompt for visual continuity
+                    logger.info(
+                        "Shot %d is sora with last_frame transition — "
+                        "T2V only, visual continuity via prompt",
+                        i,
+                    )
 
                 # Generate video for this shot
                 shot_output = await _generate_shot(

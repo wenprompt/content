@@ -8,6 +8,7 @@ Video generation: client.aio.models.generate_videos → poll operations → down
 from __future__ import annotations
 
 import asyncio
+import io
 import logging
 import time
 from typing import TYPE_CHECKING, Any
@@ -122,18 +123,31 @@ class GoogleClient:
         Returns:
             GenerationResult with MP4 video bytes.
         """
+        # Veo 3.1 only accepts exactly 4, 6, or 8 seconds
+        clamped_duration = _snap_veo_duration(duration)
+
         config = types.GenerateVideosConfig(
             aspect_ratio=aspect_ratio,
             number_of_videos=1,
-            duration_seconds=duration,
+            duration_seconds=clamped_duration,
             person_generation="allow_adult",
         )
+
+        # Convert PIL Image to types.Image for the API
+        veo_image = None
+        if image is not None:
+            buf = io.BytesIO()
+            image.save(buf, format="PNG")
+            veo_image = types.Image(
+                image_bytes=buf.getvalue(),
+                mime_type="image/png",
+            )
 
         try:
             operation = await self._client.aio.models.generate_videos(
                 model="veo-3.1-generate-preview",
                 prompt=prompt,
-                image=image,
+                image=veo_image,
                 config=config,
             )
         except Exception as exc:
@@ -177,11 +191,9 @@ class GoogleClient:
             if video_obj is None:
                 raise GoogleAPIError("No video file in generation response")
 
-            await self._client.aio.files.download(file=video_obj)  # type: ignore[arg-type]
-
-            # After download, video_bytes is populated
-            video_bytes = video_obj.video_bytes
-            if video_bytes is None:
+            # files.download returns the bytes directly
+            video_bytes = await self._client.aio.files.download(file=video_obj)  # type: ignore[arg-type]
+            if not video_bytes:
                 raise GoogleAPIError("Downloaded video has no bytes")
 
         except GoogleAPIError:
@@ -189,11 +201,21 @@ class GoogleClient:
         except Exception as exc:
             raise GoogleAPIError(f"Failed to download generated video: {exc}") from exc
 
-        cost = duration * _VIDEO_COST_PER_SECOND
+        cost = clamped_duration * _VIDEO_COST_PER_SECOND
 
         return GenerationResult(
             data=video_bytes,
             cost_estimate=cost,
             media_type="video/mp4",
-            duration_seconds=float(duration),
+            duration_seconds=float(clamped_duration),
         )
+
+
+def _snap_veo_duration(duration: int) -> int:
+    """Snap duration to nearest valid Veo 3.1 value (4, 6, or 8)."""
+    if duration <= 5:
+        return 4
+    elif duration <= 7:
+        return 6
+    else:
+        return 8

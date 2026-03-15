@@ -9,6 +9,7 @@ from fastapi.middleware.cors import CORSMiddleware
 
 from backend.api.jobs import router as jobs_router
 from backend.api.projects import router as projects_router
+from backend.api.trends import router as trends_router
 from backend.api.websocket import router as ws_router
 from backend.clients.comfyui_client import ComfyUIClient
 from backend.clients.google_client import GoogleClient
@@ -62,9 +63,16 @@ app.add_middleware(
 
 app.include_router(projects_router)
 app.include_router(jobs_router)
+app.include_router(trends_router)
 app.include_router(ws_router)
 
 
 @app.get("/health")
 async def health() -> dict[str, str]:
     return {"status": "ok"}
+
+
+if __name__ == "__main__":
+    import uvicorn
+
+    uvicorn.run(app, host="127.0.0.1", port=8000)

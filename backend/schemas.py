@@ -151,6 +151,33 @@ class TrendFetchRequest(BaseModel):
     hashtags: list[str] = []
 
 
+class TrendVideoMeta(BaseModel):
+    video_id: str = ""
+    video_url: str = ""
+    download_url: str = ""
+    description: str = ""
+    view_count: int = 0
+    like_count: int = 0
+    comment_count: int = 0
+    share_count: int = 0
+    duration: int = 0
+    creator_name: str = ""
+    creator_followers: int = 0
+    hashtags: list[str] = []
+    music_name: str = ""
+
+
+class TrendAnalyzeRequest(BaseModel):
+    video_url: str
+    platform: str = "tiktok"
+    niche: str = ""
+
+
+class TrendRemixRequest(BaseModel):
+    trend_analysis_id: str
+    project_id: str
+
+
 class TrendAnalysisResponse(BaseModel):
     model_config = ConfigDict(from_attributes=True)
 

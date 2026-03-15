@@ -102,7 +102,8 @@ async def normalize_video(
         "-c:v", "libx264",
         "-preset", "fast",
         "-crf", "18",
-        "-an",
+        "-c:a", "aac",
+        "-b:a", "128k",
         str(out),
     )
     return out
@@ -110,14 +111,15 @@ async def normalize_video(
 
 async def concatenate_videos(paths: list[str | Path], output: str | Path) -> Path:
     out = Path(output)
-    with tempfile.NamedTemporaryFile(
-        mode="w", suffix=".txt", delete=False
-    ) as f:
-        for p in paths:
-            f.write(f"file '{Path(p).resolve().as_posix()}'\n")
-        concat_file = f.name
-
+    # Write concat list to a temp file. Use delete=False and close before
+    # passing to ffmpeg — on Windows, NamedTemporaryFile keeps the file
+    # locked while open, preventing ffmpeg from reading it.
+    concat_file = tempfile.mktemp(suffix=".txt")  # noqa: S324
     try:
+        Path(concat_file).write_text(
+            "".join(f"file '{Path(p).resolve().as_posix()}'\n" for p in paths),
+            encoding="utf-8",
+        )
         await _run(
             "ffmpeg", "-y",
             "-f", "concat",

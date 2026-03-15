@@ -126,13 +126,13 @@ class OpenAIClient:
         # Map resolution to size
         size = _resolution_to_size(resolution)
 
-        # Map duration to supported values (4, 8, 12)
+        # Map duration to supported values (4, 8, 12) — API expects string
         seconds = _snap_duration(duration)
 
         create_kwargs: dict[str, Any] = {
             "model": model,
             "prompt": prompt,
-            "seconds": seconds,
+            "seconds": str(seconds),
             "size": size,
         }
 

@@ -119,7 +119,7 @@ class TestGenerateVideo:
 
         client._client.aio.models.generate_videos = AsyncMock(return_value=op_pending)
         client._client.aio.operations.get = AsyncMock(return_value=op_done)
-        client._client.aio.files.download = AsyncMock()
+        client._client.aio.files.download = AsyncMock(return_value=b"fake-mp4-data")
         client._poll_interval = 0.01  # Speed up test
 
         result = await client.generate_video("a sunset scene")
@@ -138,7 +138,7 @@ class TestGenerateVideo:
         client._client.aio.operations.get = AsyncMock(
             side_effect=[op_still_pending, op_still_pending, op_done]
         )
-        client._client.aio.files.download = AsyncMock()
+        client._client.aio.files.download = AsyncMock(return_value=b"fake-mp4-data")
         client._poll_interval = 0.01
 
         result = await client.generate_video("test")
@@ -152,7 +152,7 @@ class TestGenerateVideo:
 
         client._client.aio.models.generate_videos = AsyncMock(return_value=op_pending)
         client._client.aio.operations.get = AsyncMock(return_value=op_done)
-        client._client.aio.files.download = AsyncMock()
+        client._client.aio.files.download = AsyncMock(return_value=b"fake-mp4-data")
         client._poll_interval = 0.01
 
         progress_calls: list[tuple[int, int]] = []
@@ -170,14 +170,17 @@ class TestGenerateVideo:
         op_done.done = True
 
         client._client.aio.models.generate_videos = AsyncMock(return_value=op_done)
-        client._client.aio.files.download = AsyncMock()
+        client._client.aio.files.download = AsyncMock(return_value=b"fake-mp4-data")
         client._poll_interval = 0.01
 
         ref_image = Image.new("RGB", (128, 128), color="blue")
         await client.generate_video("test", image=ref_image)
 
         call_kwargs = client._client.aio.models.generate_videos.call_args
-        assert call_kwargs.kwargs.get("image") is ref_image
+        veo_image = call_kwargs.kwargs.get("image")
+        assert veo_image is not None
+        assert veo_image.mime_type == "image/png"
+        assert veo_image.image_bytes is not None
 
     async def test_generate_video_timeout(self, client: GoogleClient) -> None:
         op_pending = _make_video_operation(done=False)
@@ -225,12 +228,13 @@ class TestGenerateVideo:
     async def test_generate_video_duration_affects_cost(self, client: GoogleClient) -> None:
         op_done = _make_video_operation(done=True)
         client._client.aio.models.generate_videos = AsyncMock(return_value=op_done)
-        client._client.aio.files.download = AsyncMock()
+        client._client.aio.files.download = AsyncMock(return_value=b"fake-mp4-data")
 
         result = await client.generate_video("test", duration=5)
 
-        assert result.cost_estimate == 5 * _VIDEO_COST_PER_SECOND
-        assert result.duration_seconds == 5.0
+        # duration=5 snaps to 4 via _snap_veo_duration
+        assert result.cost_estimate == 4 * _VIDEO_COST_PER_SECOND
+        assert result.duration_seconds == 4.0
 
     async def test_cost_estimates_video(self) -> None:
         assert _VIDEO_COST_PER_SECOND == 0.75

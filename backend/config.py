@@ -22,7 +22,8 @@ class Settings(BaseSettings):
     trend_default_time_range: str = "7d"
     trend_min_views: int = 100000
     trend_max_videos_per_fetch: int = 50
-    trend_analysis_model: str = "gemini-3-pro"
+    trend_analysis_model: str = "gemini-3.1-pro-preview"
+    google_application_credentials: str = ""
 
     # Pipeline
     output_dir: str = "./output"

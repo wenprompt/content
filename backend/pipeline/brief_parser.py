@@ -17,6 +17,7 @@ PLATFORM_DIMENSIONS: dict[str, tuple[int, int]] = {
 }
 
 MAX_DURATION_PER_TOOL: dict[str, float] = {"ltx": 20.0, "veo": 8.0, "sora": 12.0}
+MIN_DURATION_PER_TOOL: dict[str, float] = {"ltx": 2.0, "veo": 4.0, "sora": 4.0}
 
 SYSTEM_PROMPT = """\
 You are a video production planner. Given a creative brief, output a JSON array of shot objects.
@@ -42,9 +43,10 @@ Shot count guidelines by content type:
 - animation: 5 shots (intro, build, transform, showcase, outro)
 
 Tool selection rules (when tool_preference is "auto"):
-- Default to "ltx" (free, local, supports camera LoRAs)
-- Use "veo" when the brief mentions native audio needs or high realism
-- Use "sora" for photorealistic cinematic content
+- Default to "veo" (best multi-shot quality, native audio with lip-sync, 4K)
+- Use "sora" for stylized animation (anime, cartoon, 3D, pixar), complex physics \
+(explosions, chase, shatter), or atmospheric B-roll without characters
+- Use "ltx" only when explicitly preferred (free, local, camera LoRAs)
 
 Camera movement guidelines:
 - static: talking heads, text overlays, product displays
@@ -72,6 +74,7 @@ class ShotPlan:
     transition_type: str
     lighting: str
     audio: str
+    content_type: str = ""
 
 
 def _build_user_prompt(project: Project) -> str:
@@ -151,7 +154,8 @@ def _postprocess(
             tool = project.tool_preference
 
         max_dur = MAX_DURATION_PER_TOOL.get(tool, 20.0)
-        duration = min(float(raw.get("duration", 5.0)), max_dur)
+        min_dur = MIN_DURATION_PER_TOOL.get(tool, 2.0)
+        duration = max(min(float(raw.get("duration", 5.0)), max_dur), min_dur)
 
         transition = str(raw.get("transition_type", "last_frame"))
         if i == 0:

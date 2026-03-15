@@ -12,8 +12,16 @@ wheels/
 # Environment
 .env
 
+# Credentials
+credentials/*
+!credentials/.gitkeep
+
 # Database
 *.db
+
+# Downloads
+downloads/*
+!downloads/.gitkeep
 
 # Output
 output/

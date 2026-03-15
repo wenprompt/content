@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import json
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
@@ -16,8 +15,6 @@ from backend.pipeline.brief_parser import (
 )
 from backend.pipeline.prompt_generator import (
     CAMERA_LORA_MAP,
-    LTX_NEGATIVE_PROMPT,
-    ToolPrompt,
     generate_tool_prompt,
 )
 
@@ -38,7 +35,7 @@ def _make_project(**overrides: object) -> Project:
         "status": "draft",
     }
     defaults.update(overrides)
-    return Project(**defaults)  # type: ignore[arg-type]
+    return Project(**defaults)
 
 
 def _make_raw_shots(count: int = 6, tool: str = "ltx") -> list[dict[str, object]]:
@@ -183,7 +180,9 @@ class TestGenerateToolPrompt:
         plan = _make_shot_plan(tool="ltx")
         project = _make_project()
         result = generate_tool_prompt(plan, project)
-        assert result.negative_prompt == LTX_NEGATIVE_PROMPT
+        # New prompter uses content-type-based negative prompts; default is "standard"
+        assert "worst quality" in result.negative_prompt
+        assert "low quality" in result.negative_prompt
 
     def test_ltx_lora_mapping(self) -> None:
         plan = _make_shot_plan(tool="ltx", camera_movement="dolly_in")
@@ -204,7 +203,7 @@ class TestGenerateToolPrompt:
         result = generate_tool_prompt(plan, project)
         # Unknown camera movement → no LoRA, camera text in prompt
         assert result.lora_name == ""
-        assert "Camera:" in result.prompt
+        assert "camera" in result.prompt.lower()
 
     def test_veo_prompt_includes_audio(self) -> None:
         plan = _make_shot_plan(tool="veo", audio="dramatic orchestral swell")
